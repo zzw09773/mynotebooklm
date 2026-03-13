@@ -1,0 +1,52 @@
+"""
+LLM and Embedding model service.
+Uses httpx with SSL verification disabled for self-signed certs.
+"""
+import ssl
+import httpx
+from llama_index.core import Settings as LlamaSettings
+from llama_index.llms.openai_like import OpenAILike
+from llama_index.embeddings.openai import OpenAIEmbedding
+
+from app.config import get_settings, create_ssl_context
+
+settings = get_settings()
+
+# Global httpx client that skips SSL verification
+_http_client = httpx.Client(verify=False, timeout=httpx.Timeout(120.0))
+_async_http_client = httpx.AsyncClient(verify=False, timeout=httpx.Timeout(120.0))
+
+
+def get_llm() -> OpenAILike:
+    """Return a configured LLM instance pointing to the local API."""
+    llm = OpenAILike(
+        api_base=settings.llm_api_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        temperature=settings.temperature,
+        is_chat_model=True,
+        is_function_calling_model=False,
+        max_tokens=4096,
+        http_client=_http_client,
+        async_http_client=_async_http_client,
+    )
+    return llm
+
+
+def get_embed_model() -> OpenAIEmbedding:
+    """Return a configured embedding model instance."""
+    embed = OpenAIEmbedding(
+        api_base=settings.llm_api_base_url,
+        api_key=settings.llm_api_key,
+        model_name=settings.embedding_model,
+        http_client=_http_client,
+    )
+    return embed
+
+
+def configure_llama_index():
+    """Set global LlamaIndex defaults."""
+    LlamaSettings.llm = get_llm()
+    LlamaSettings.embed_model = get_embed_model()
+    LlamaSettings.chunk_size = settings.chunk_size
+    LlamaSettings.chunk_overlap = settings.chunk_overlap

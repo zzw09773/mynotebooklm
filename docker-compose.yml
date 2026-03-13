@@ -1,0 +1,43 @@
+services:
+  backend:
+    container_name: notebooklm_backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - TZ=Asia/Taipei
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    ports:
+      - 8100:8000
+    restart: always
+    networks:
+      - notebooklm_network
+
+  frontend:
+    container_name: notebooklm_frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      - TZ=Asia/Taipei
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - 3100:3000
+    depends_on:
+      - backend
+    restart: always
+    networks:
+      - notebooklm_network
+
+networks:
+  notebooklm_network:
+    driver: bridge

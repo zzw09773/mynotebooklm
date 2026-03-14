@@ -64,9 +64,13 @@ def _build_context_and_citations(
 async def chat_with_rag(
     query: str,
     collection_names: list[str] | None = None,
+    history: list[dict] | None = None,
+    conversation_id: int | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Perform RAG retrieval then stream the LLM answer.
+    Supports multi-turn conversation via the `history` parameter.
+    If `conversation_id` is provided, persists messages to DB after streaming.
 
     Yields SSE-formatted lines:
       - data: {"type": "citations", "citations": [...]}
@@ -74,7 +78,7 @@ async def chat_with_rag(
       - data: {"type": "done"}
     """
     # 1. Determine which collections to search
-    if not collection_names:
+    if collection_names is None:
         collection_names = list_collections()
 
     if not collection_names:
@@ -114,22 +118,50 @@ async def chat_with_rag(
         f"請根據上述參考資料，用繁體中文詳細回答這個問題，並使用 [來源 N] 標註引用。"
     )
 
-    # 5. Stream LLM response
+    # 5. Build message list with conversation history
     llm = get_llm()
     messages = [
         ChatMessage(role=MessageRole.SYSTEM, content=SYSTEM_PROMPT),
-        ChatMessage(role=MessageRole.USER, content=user_prompt),
     ]
 
+    # Inject recent conversation history (last 6 messages = ~3 turns)
+    if history:
+        for h in history[-6:]:
+            role = MessageRole.USER if h["role"] == "user" else MessageRole.ASSISTANT
+            messages.append(ChatMessage(role=role, content=h["content"]))
+
+    # Current user query (with RAG context)
+    messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
+
     response = await llm.astream_chat(messages)
+    full_response = ""
     async for chunk in response:
         token = chunk.delta
         if token:
+            full_response += token
             yield _sse({"type": "token", "content": token})
 
     yield _sse({"type": "done"})
+
+    # 6. Persist messages to DB if conversation_id is provided
+    if conversation_id is not None:
+        import json as _json
+        from app.models import add_message, touch_conversation
+        try:
+            add_message(conversation_id, "user", query)
+            add_message(
+                conversation_id,
+                "assistant",
+                full_response,
+                citations_json=_json.dumps(citations, ensure_ascii=False),
+            )
+            touch_conversation(conversation_id)
+        except Exception:
+            pass  # Don't fail the stream if persistence fails
+
 
 
 def _sse(data: dict) -> str:
     """Format a dict as an SSE data line."""
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+

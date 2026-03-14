@@ -10,11 +10,13 @@ warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWar
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import documents, chat, settings
+from app.routers import documents, chat, settings, projects
 from app.services.llm_service import configure_llama_index
+from app.models import init_db
 
 # Configure LlamaIndex global defaults
 configure_llama_index()
+init_db()
 
 app = FastAPI(
     title="NotebookLM API",
@@ -35,6 +37,10 @@ app.add_middleware(
 app.include_router(documents.router)
 app.include_router(chat.router)
 app.include_router(settings.router)
+app.include_router(projects.router)
+
+from app.routers import conversations
+app.include_router(conversations.router)
 
 
 @app.get("/health", tags=["系統"])

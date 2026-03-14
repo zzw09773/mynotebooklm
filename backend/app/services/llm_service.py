@@ -39,6 +39,7 @@ def get_embed_model() -> OpenAIEmbedding:
         api_base=settings.llm_api_base_url,
         api_key=settings.llm_api_key,
         model_name=settings.embedding_model,
+        embed_batch_size=1,  # Prevent CUDA OOM in Triton by forcing sequential embedding evaluation
         http_client=_http_client,
     )
     return embed

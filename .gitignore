@@ -40,3 +40,6 @@ coverage/
 *.log
 backend/chroma_db/
 backend/uploads/
+data/
+backend/db.sqlite
+docs/

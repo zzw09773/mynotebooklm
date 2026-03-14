@@ -1,6 +1,7 @@
 """
 Document processing service:
-  - Parse PDFs via PyMuPDF
+  - Parse PDFs via PyMuPDF (with OCR fallback for scanned pages)
+  - Process image files via Tesseract OCR
   - Chunk text with LlamaIndex
   - Store / retrieve vectors in ChromaDB
 """
@@ -9,9 +10,12 @@ import uuid
 import shutil
 from pathlib import Path
 from typing import Optional
+from io import BytesIO
 
 import fitz  # PyMuPDF
 import chromadb
+import pytesseract
+from PIL import Image
 from llama_index.core import Document, VectorStoreIndex, StorageContext
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
@@ -21,6 +25,9 @@ from app.services.llm_service import get_embed_model
 
 
 settings = get_settings()
+
+# Minimum characters on a page before triggering OCR fallback
+_OCR_THRESHOLD = 50
 
 
 # ── ChromaDB singleton ───────────────────────────────────────
@@ -35,21 +42,45 @@ def _get_chroma_client() -> chromadb.PersistentClient:
     return _chroma_client
 
 
-# ── PDF text extraction ──────────────────────────────────────
+# ── PDF text extraction (hybrid: native + OCR fallback) ──────
+
+def _ocr_page_image(page: fitz.Page) -> str:
+    """Render a PDF page to an image and run Tesseract OCR."""
+    pix = page.get_pixmap(dpi=300)
+    img = Image.open(BytesIO(pix.tobytes("png")))
+    text = pytesseract.image_to_string(img, lang="chi_tra+eng")
+    return text.strip()
+
 
 def extract_text_from_pdf(file_path: str) -> list[dict]:
     """
     Extract text from a PDF file page by page.
+    Uses native text extraction first; falls back to OCR if the page
+    has fewer than _OCR_THRESHOLD characters of text (scanned page).
     Returns a list of dicts: [{"page": 1, "text": "..."}, ...]
     """
     doc = fitz.open(file_path)
     pages = []
     for page_num, page in enumerate(doc, start=1):
         text = page.get_text("text")
+        # If native extraction yields very little text, try OCR
+        if len(text.strip()) < _OCR_THRESHOLD:
+            ocr_text = _ocr_page_image(page)
+            if ocr_text:
+                text = ocr_text
         if text.strip():
             pages.append({"page": page_num, "text": text})
     doc.close()
     return pages
+
+
+# ── Image OCR extraction ─────────────────────────────────────
+
+def extract_text_from_image(file_path: str) -> str:
+    """Run Tesseract OCR on a single image file (.jpg/.png)."""
+    img = Image.open(file_path)
+    text = pytesseract.image_to_string(img, lang="chi_tra+eng")
+    return text.strip()
 
 
 # ── Document ingestion ───────────────────────────────────────
@@ -124,6 +155,58 @@ def ingest_document(file_path: str, original_filename: str) -> dict:
     }
 
 
+def ingest_image(file_path: str, original_filename: str) -> dict:
+    """
+    Process an image file (.jpg/.png) via OCR, chunk it,
+    generate embeddings, and store in ChromaDB.
+    """
+    text = extract_text_from_image(file_path)
+    if not text:
+        raise ValueError("圖片中未辨識到任何文字。")
+
+    doc = Document(
+        text=text,
+        metadata={
+            "source_file": original_filename,
+            "file_path": file_path,
+            "page_number": 1,
+        },
+    )
+
+    splitter = SentenceSplitter(
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+    )
+    nodes = splitter.get_nodes_from_documents([doc])
+
+    doc_id = Path(file_path).stem
+    for i, node in enumerate(nodes):
+        node.metadata["doc_id"] = doc_id
+        node.metadata["chunk_index"] = i
+
+    chroma_client = _get_chroma_client()
+    collection_name = _sanitize_collection_name(doc_id)
+    chroma_collection = chroma_client.get_or_create_collection(name=collection_name)
+    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+    embed_model = get_embed_model()
+    VectorStoreIndex(
+        nodes=nodes,
+        storage_context=storage_context,
+        embed_model=embed_model,
+    )
+
+    return {
+        "doc_id": doc_id,
+        "collection_name": collection_name,
+        "filename": original_filename,
+        "total_pages": 1,
+        "total_chunks": len(nodes),
+        "file_path": file_path,
+    }
+
+
 # ── Document retrieval helpers ────────────────────────────────
 
 def list_collections() -> list[str]:
@@ -148,10 +231,13 @@ def get_retriever(collection_name: str, top_k: int | None = None):
     return index.as_retriever(similarity_top_k=top_k or settings.top_k)
 
 
-def delete_document(collection_name: str) -> None:
+def delete_document(collection_name: str, file_path: str | None = None) -> None:
     """Delete a document collection and its uploaded file."""
     client = _get_chroma_client()
     client.delete_collection(name=collection_name)
+    # Clean up the original uploaded file from disk
+    if file_path and os.path.exists(file_path):
+        os.remove(file_path)
 
 
 # ── Helpers ───────────────────────────────────────────────────

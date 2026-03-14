@@ -15,6 +15,7 @@ import { ProjectDashboard } from "@/components/ProjectDashboard";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatArea } from "@/components/ChatArea";
 import { SettingsModal } from "@/components/SettingsModal";
+import { StudioPanel } from "@/components/StudioPanel";
 
 export default function NotebookLMPage() {
     const router = useRouter();
@@ -39,6 +40,9 @@ export default function NotebookLMPage() {
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const [expandedGuide, setExpandedGuide] = useState<string | null>(null);
     const [summaries, setSummaries] = useState<Record<string, SummaryInfo>>({});
+
+    // ── Studio state ───────────────────────────────────────
+    const [showStudio, setShowStudio] = useState(false);
 
     // ── Settings state ─────────────────────────────────────
     const [showSettings, setShowSettings] = useState(false);
@@ -260,7 +264,15 @@ export default function NotebookLMPage() {
                 onErrorDismiss={() => setErrorMsg(null)}
                 onOpenSidebar={() => setSidebarOpen(true)}
                 onOpenSettings={handleOpenSettings}
+                onOpenStudio={() => setShowStudio(true)}
             />
+
+            {showStudio && activeProject && (
+                <StudioPanel
+                    activeProject={activeProject}
+                    onClose={() => setShowStudio(false)}
+                />
+            )}
 
             {showSettings && (
                 <SettingsModal

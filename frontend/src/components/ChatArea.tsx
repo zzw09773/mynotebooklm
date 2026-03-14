@@ -3,7 +3,7 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import {
-    Send, Loader2, Bot, User as UserIcon, AlertCircle, X, ChevronRight, Sparkles, Settings, MessageSquare,
+    Send, Loader2, Bot, User as UserIcon, AlertCircle, X, ChevronRight, Sparkles, Settings, MessageSquare, Layers,
 } from "lucide-react";
 import { ChatMessage, Citation, AppSettings } from "@/lib/api";
 
@@ -20,11 +20,12 @@ interface ChatAreaProps {
     onErrorDismiss: () => void;
     onOpenSidebar: () => void;
     onOpenSettings: () => void;
+    onOpenStudio: () => void;
 }
 
 export function ChatArea({
     messages, isStreaming, inputValue, errorMsg, sidebarOpen, documents, settings,
-    onSend, onInputChange, onErrorDismiss, onOpenSidebar, onOpenSettings,
+    onSend, onInputChange, onErrorDismiss, onOpenSidebar, onOpenSettings, onOpenStudio,
 }: ChatAreaProps) {
     const chatEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -75,6 +76,14 @@ export function ChatArea({
                         )}
                     </span>
                 </div>
+                <button
+                    onClick={onOpenStudio}
+                    className="p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-primary-400 transition-colors"
+                    aria-label="開啟工作室"
+                    title="工作室"
+                >
+                    <Layers className="w-4 h-4" />
+                </button>
                 <button
                     onClick={onOpenSettings}
                     className="p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-primary-400 transition-colors"

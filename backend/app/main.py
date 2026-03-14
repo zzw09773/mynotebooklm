@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import auth, documents, chat, settings, projects, conversations
+from app.routers import auth, documents, chat, settings, projects, conversations, studio
 from app.services.llm_service import configure_llama_index
 from app.models import init_db
 
@@ -43,6 +43,7 @@ app.include_router(chat.router)
 app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(conversations.router)
+app.include_router(studio.router)
 
 
 @app.get("/health", tags=["系統"])

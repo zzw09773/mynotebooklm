@@ -10,7 +10,8 @@ warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWar
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import documents, chat, settings, projects
+from app.config import get_settings
+from app.routers import auth, documents, chat, settings, projects, conversations
 from app.services.llm_service import configure_llama_index
 from app.models import init_db
 
@@ -18,28 +19,29 @@ from app.models import init_db
 configure_llama_index()
 init_db()
 
+_settings = get_settings()
+
 app = FastAPI(
     title="NotebookLM API",
     description="本地 NotebookLM – 基於文件的 RAG 對話系統 API",
-    version="0.1.0",
+    version="0.2.0",
 )
 
-# CORS – allow the frontend to call the API
+# CORS – allow specific origins from config
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in _settings.cors_origins.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Register routers
+app.include_router(auth.router)
 app.include_router(documents.router)
 app.include_router(chat.router)
 app.include_router(settings.router)
 app.include_router(projects.router)
-
-from app.routers import conversations
 app.include_router(conversations.router)
 
 

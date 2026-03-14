@@ -2,10 +2,12 @@
 Settings API routes – get/update LLM configuration and list available models.
 """
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.config import get_settings
+from app.dependencies import get_current_user
+from app.models import User
 
 router = APIRouter(prefix="/api/settings", tags=["設定"])
 
@@ -44,7 +46,7 @@ _runtime_settings = get_settings()
 
 
 @router.get("/", response_model=SettingsResponse, summary="取得目前設定")
-async def get_current_settings():
+async def get_current_settings(current_user: User = Depends(get_current_user)):
     return SettingsResponse(
         llm_api_base_url=_runtime_settings.llm_api_base_url,
         llm_api_key=_runtime_settings.llm_api_key,
@@ -57,7 +59,7 @@ async def get_current_settings():
 
 
 @router.put("/", response_model=SettingsResponse, summary="更新設定")
-async def update_settings(update: SettingsUpdate):
+async def update_settings(update: SettingsUpdate, current_user: User = Depends(get_current_user)):
     if update.llm_api_base_url is not None:
         _runtime_settings.llm_api_base_url = update.llm_api_base_url
     if update.llm_api_key is not None:
@@ -81,7 +83,7 @@ async def update_settings(update: SettingsUpdate):
 
 
 @router.get("/models", response_model=ModelsResponse, summary="列出可用模型")
-async def list_models():
+async def list_models(current_user: User = Depends(get_current_user)):
     """Fetch available models from the LLM API endpoint."""
     try:
         async with httpx.AsyncClient(verify=False, timeout=15.0) as client:

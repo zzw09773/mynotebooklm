@@ -3,6 +3,7 @@ Chat / RAG service – retrieves relevant chunks and streams
 answers with citation metadata.
 """
 import json
+import logging
 from typing import AsyncGenerator
 
 from llama_index.core.schema import NodeWithScore
@@ -10,6 +11,7 @@ from llama_index.core.schema import NodeWithScore
 from llama_index.core.llms import ChatMessage, MessageRole
 
 from app.config import get_settings
+from app.models import add_message, touch_conversation
 from app.services.document_service import get_retriever, list_collections
 from app.services.llm_service import get_llm
 
@@ -94,6 +96,7 @@ async def chat_with_rag(
             nodes = retriever.retrieve(query)
             all_nodes.extend(nodes)
         except Exception:
+            logging.exception("Failed to retrieve from collection: %s", cname)
             continue
 
     # Sort by score descending and take top-k
@@ -145,19 +148,17 @@ async def chat_with_rag(
 
     # 6. Persist messages to DB if conversation_id is provided
     if conversation_id is not None:
-        import json as _json
-        from app.models import add_message, touch_conversation
         try:
             add_message(conversation_id, "user", query)
             add_message(
                 conversation_id,
                 "assistant",
                 full_response,
-                citations_json=_json.dumps(citations, ensure_ascii=False),
+                citations_json=json.dumps(citations, ensure_ascii=False),
             )
             touch_conversation(conversation_id)
         except Exception:
-            pass  # Don't fail the stream if persistence fails
+            logging.exception("Failed to persist messages for conversation_id=%s", conversation_id)
 
 
 

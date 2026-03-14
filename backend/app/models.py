@@ -1,6 +1,7 @@
 """
 Project database models using SQLModel (SQLite).
 """
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,9 +19,18 @@ _engine = create_engine(f"sqlite:///{_DB_PATH}", echo=False)
 
 # ── Models ────────────────────────────────────────────────────
 
+class User(SQLModel, table=True):
+    """A registered user."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str = Field(index=True, unique=True)
+    password_hash: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
 class Project(SQLModel, table=True):
     """A workspace that groups documents and conversations together."""
     id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(default=0, index=True)
     name: str = Field(index=True)
     description: str = ""
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -47,43 +57,81 @@ def init_db():
     """Create all tables if they don't exist, and migrate existing tables."""
     os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
     SQLModel.metadata.create_all(_engine)
-    # Migrate: add new columns to existing ProjectDocument table
-    _migrate_project_document()
+    # Migrate: add new columns to existing tables
+    _run_migrations()
 
-def _migrate_project_document():
-    """Add new columns to ProjectDocument if they don't exist (SQLite)."""
+def _run_migrations():
+    """Add new columns to existing tables if they don't exist (SQLite)."""
     import sqlite3
     conn = sqlite3.connect(_DB_PATH)
-    cursor = conn.cursor()
-    # Check existing columns
-    cursor.execute("PRAGMA table_info(projectdocument)")
-    columns = {row[1] for row in cursor.fetchall()}
-    if "status" not in columns:
-        cursor.execute("ALTER TABLE projectdocument ADD COLUMN status TEXT DEFAULT 'ready'")
-    if "error_message" not in columns:
-        cursor.execute("ALTER TABLE projectdocument ADD COLUMN error_message TEXT DEFAULT ''")
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+
+        # Migrate ProjectDocument
+        cursor.execute("PRAGMA table_info(projectdocument)")
+        pd_cols = {row[1] for row in cursor.fetchall()}
+        if pd_cols:  # table exists
+            if "status" not in pd_cols:
+                cursor.execute("ALTER TABLE projectdocument ADD COLUMN status TEXT DEFAULT 'ready'")
+            if "error_message" not in pd_cols:
+                cursor.execute("ALTER TABLE projectdocument ADD COLUMN error_message TEXT DEFAULT ''")
+
+        # Migrate Project – add user_id
+        cursor.execute("PRAGMA table_info(project)")
+        proj_cols = {row[1] for row in cursor.fetchall()}
+        if proj_cols and "user_id" not in proj_cols:
+            cursor.execute("ALTER TABLE project ADD COLUMN user_id INTEGER DEFAULT 0")
+
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        logging.warning("Migration warning: %s", e)
+    finally:
+        conn.close()
 
 
 def get_session() -> Session:
     return Session(_engine)
 
 
+# ── User CRUD ────────────────────────────────────────────────
+
+def create_user(username: str, password_hash: str) -> User:
+    with get_session() as session:
+        user = User(username=username, password_hash=password_hash)
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+def get_user_by_username(username: str) -> User | None:
+    with get_session() as session:
+        stmt = select(User).where(User.username == username)
+        return session.exec(stmt).first()
+
+
+def get_user_by_id(user_id: int) -> User | None:
+    with get_session() as session:
+        return session.get(User, user_id)
+
+
 # ── Project CRUD ──────────────────────────────────────────────
 
-def create_project(name: str, description: str = "") -> Project:
+def create_project(name: str, description: str = "", user_id: int = 0) -> Project:
     with get_session() as session:
-        project = Project(name=name, description=description)
+        project = Project(name=name, description=description, user_id=user_id)
         session.add(project)
         session.commit()
         session.refresh(project)
         return project
 
 
-def list_projects() -> list[Project]:
+def list_projects(user_id: int | None = None) -> list[Project]:
     with get_session() as session:
-        return list(session.exec(select(Project).order_by(Project.updated_at.desc())).all())
+        stmt = select(Project).order_by(Project.updated_at.desc())
+        if user_id is not None:
+            stmt = stmt.where(Project.user_id == user_id)
+        return list(session.exec(stmt).all())
 
 
 def get_project(project_id: int) -> Project | None:
@@ -134,7 +182,7 @@ def delete_project(project_id: int) -> bool:
         try:
             delete_document(collection_name, file_path=file_path)
         except Exception:
-            pass  # Best-effort cleanup
+            logging.exception("Failed to cleanup document: %s", collection_name)
     return True
 
 

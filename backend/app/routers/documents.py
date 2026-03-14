@@ -3,21 +3,17 @@ Document management API routes – scoped to a project.
 Supports PDF and image (.jpg/.png) uploads with OCR.
 """
 import json
+import logging
 import os
-import traceback
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks
-from pydantic import BaseModel
-from typing import Optional
+from pathlib import Path
 
-from app.services.document_service import (
-    save_uploaded_file,
-    ingest_document,
-    ingest_image,
-    delete_document,
-    _sanitize_collection_name,
-)
-from app.services.summary_service import generate_study_guide
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, BackgroundTasks
+from pydantic import BaseModel
+
+from app.config import get_settings
+from app.dependencies import get_current_user
 from app.models import (
+    User,
     get_project,
     add_document_to_project,
     list_project_documents,
@@ -27,7 +23,14 @@ from app.models import (
     get_document_by_collection,
     update_document_status,
 )
-from app.config import get_settings
+from app.services.document_service import (
+    save_uploaded_file,
+    ingest_document,
+    ingest_image,
+    delete_document,
+    _sanitize_collection_name,
+)
+from app.services.summary_service import generate_study_guide
 
 router = APIRouter(prefix="/api/documents", tags=["文件管理"])
 settings = get_settings()
@@ -65,7 +68,19 @@ class DocumentStatusResponse(BaseModel):
     error_message: str = ""
 
 
-def _process_document_background(
+# ── Helpers ──────────────────────────────────────────────────
+
+def _check_project_ownership(project_id: int, user: User):
+    """Verify user owns the project. Raises 404/403."""
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="找不到該專案。")
+    if project.user_id != user.id:
+        raise HTTPException(status_code=403, detail="您無權存取此專案。")
+    return project
+
+
+async def _process_document_background(
     file_path: str, filename: str, ext: str,
     collection_name: str, project_id: int,
 ):
@@ -85,9 +100,10 @@ def _process_document_background(
 
         # Trigger study guide generation
         create_summary(project_id, collection_name)
-        generate_study_guide(collection_name, project_id)
+        await generate_study_guide(collection_name, project_id)
 
     except Exception as e:
+        logging.exception("Document processing failed for collection: %s", collection_name)
         update_document_status(
             collection_name,
             status="error",
@@ -95,21 +111,16 @@ def _process_document_background(
         )
 
 
+# ── Endpoints ────────────────────────────────────────────────
+
 @router.post("/upload", response_model=DocumentInfo, summary="上傳 PDF 或圖片文件")
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     project_id: int = Query(..., description="此文件隸屬的專案 ID"),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Upload a PDF or image file. Returns immediately with status='processing'.
-    The actual parsing, embedding, and study guide generation happen in the background.
-    Use GET /api/documents/{collection_name}/status to poll for completion.
-    """
-    # Validate project exists
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="找不到該專案。")
+    _check_project_ownership(project_id, current_user)
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="檔案名稱無效。")
@@ -125,13 +136,18 @@ async def upload_document(
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="檔案內容為空。")
 
+    max_size = settings.max_upload_size_mb * 1024 * 1024
+    if len(content) > max_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"檔案大小超過限制（最大 {settings.max_upload_size_mb} MB）。",
+        )
+
     try:
         file_path = save_uploaded_file(file.filename, content)
-        from pathlib import Path
         doc_id = Path(file_path).stem
         collection_name = _sanitize_collection_name(doc_id)
 
-        # Create DB record immediately with status=processing
         add_document_to_project(
             project_id=project_id,
             collection_name=collection_name,
@@ -141,7 +157,6 @@ async def upload_document(
             file_path=file_path,
         )
 
-        # Run ingestion in background
         background_tasks.add_task(
             _process_document_background,
             file_path, file.filename, ext,
@@ -156,18 +171,18 @@ async def upload_document(
             total_chunks=0,
             status="processing",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"處理文件時發生錯誤：{str(e)}")
 
 
 @router.get("/{collection_name}/status", response_model=DocumentStatusResponse, summary="查詢文件處理狀態")
-async def get_document_status(collection_name: str):
-    """
-    Poll document processing status. Returns status: processing | ready | error.
-    """
+async def get_document_status(collection_name: str, current_user: User = Depends(get_current_user)):
     doc = get_document_by_collection(collection_name)
     if not doc:
         raise HTTPException(status_code=404, detail="找不到該文件。")
+    _check_project_ownership(doc.project_id, current_user)
 
     return DocumentStatusResponse(
         collection_name=doc.collection_name,
@@ -181,13 +196,9 @@ async def get_document_status(collection_name: str):
 @router.get("/", response_model=DocumentListResponse, summary="取得專案的已上傳文件")
 async def get_documents(
     project_id: int = Query(..., description="專案 ID"),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    List all ingested documents for a project.
-    """
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="找不到該專案。")
+    _check_project_ownership(project_id, current_user)
 
     docs = list_project_documents(project_id)
     return DocumentListResponse(
@@ -206,10 +217,12 @@ async def get_documents(
 
 
 @router.get("/{collection_name}/summary", response_model=SummaryResponse, summary="取得文件摘要/學習指南")
-async def get_document_summary(collection_name: str):
-    """
-    Get the auto-generated study guide / summary for a document.
-    """
+async def get_document_summary(collection_name: str, current_user: User = Depends(get_current_user)):
+    doc = get_document_by_collection(collection_name)
+    if not doc:
+        raise HTTPException(status_code=404, detail="找不到該文件。")
+    _check_project_ownership(doc.project_id, current_user)
+
     s = get_summary(collection_name)
     if not s:
         raise HTTPException(status_code=404, detail="找不到該文件的摘要資料。")
@@ -228,13 +241,11 @@ async def get_document_summary(collection_name: str):
 async def remove_document(
     collection_name: str,
     project_id: int = Query(..., description="專案 ID"),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Delete a document collection from the vector store and unlink from project.
-    Also removes the original uploaded file from disk.
-    """
+    _check_project_ownership(project_id, current_user)
+
     try:
-        # Look up file_path from DB before deleting the record
         docs = list_project_documents(project_id)
         file_path = None
         for d in docs:

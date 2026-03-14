@@ -108,3 +108,23 @@ export async function PUT(
         headers: Object.fromEntries(res.headers),
     });
 }
+
+export async function PATCH(
+    request: NextRequest,
+    { params }: { params: Promise<{ path: string[] }> }
+) {
+    const { path } = await params;
+    const target = `${BACKEND_URL}/api/${path.join("/")}${request.nextUrl.search}`;
+    const body = await request.text();
+
+    const headers: Record<string, string> = {};
+    request.headers.forEach((v, k) => {
+        if (k !== "host" && k !== "content-length") headers[k] = v;
+    });
+
+    const res = await fetch(target, { method: "PATCH", headers, body });
+    return new NextResponse(res.body, {
+        status: res.status,
+        headers: Object.fromEntries(res.headers),
+    });
+}

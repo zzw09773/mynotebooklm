@@ -1,17 +1,20 @@
 """
 Project management API routes – CRUD for workspaces.
 """
-from fastapi import APIRouter, HTTPException
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.dependencies import get_current_user
 from app.models import (
+    User,
     create_project,
     list_projects,
     get_project,
     update_project,
     delete_project as db_delete_project,
     list_project_documents,
-    remove_document_from_project,
 )
 from app.services.document_service import delete_document
 
@@ -51,11 +54,23 @@ class ProjectDocResponse(BaseModel):
     created_at: str
 
 
+# ── Helpers ──────────────────────────────────────────────────
+
+def _check_project_ownership(project_id: int, user: User):
+    """Fetch project and verify the user owns it. Raises 404/403."""
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="找不到該專案。")
+    if project.user_id != user.id:
+        raise HTTPException(status_code=403, detail="您無權存取此專案。")
+    return project
+
+
 # ── Endpoints ─────────────────────────────────────────────────
 
 @router.post("/", response_model=ProjectResponse, summary="建立新專案")
-async def create(body: ProjectCreate):
-    project = create_project(body.name, body.description)
+async def create(body: ProjectCreate, current_user: User = Depends(get_current_user)):
+    project = create_project(body.name, body.description, user_id=current_user.id)
     return ProjectResponse(
         id=project.id,
         name=project.name,
@@ -67,8 +82,8 @@ async def create(body: ProjectCreate):
 
 
 @router.get("/", response_model=ProjectListResponse, summary="列出所有專案")
-async def list_all():
-    projects = list_projects()
+async def list_all(current_user: User = Depends(get_current_user)):
+    projects = list_projects(user_id=current_user.id)
     result = []
     for p in projects:
         docs = list_project_documents(p.id)
@@ -84,10 +99,8 @@ async def list_all():
 
 
 @router.get("/{project_id}", response_model=ProjectResponse, summary="取得專案詳情")
-async def get_one(project_id: int):
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="找不到該專案。")
+async def get_one(project_id: int, current_user: User = Depends(get_current_user)):
+    project = _check_project_ownership(project_id, current_user)
     docs = list_project_documents(project.id)
     return ProjectResponse(
         id=project.id,
@@ -100,7 +113,8 @@ async def get_one(project_id: int):
 
 
 @router.put("/{project_id}", response_model=ProjectResponse, summary="更新專案資訊")
-async def update(project_id: int, body: ProjectUpdate):
+async def update(project_id: int, body: ProjectUpdate, current_user: User = Depends(get_current_user)):
+    _check_project_ownership(project_id, current_user)
     project = update_project(project_id, body.name, body.description)
     if not project:
         raise HTTPException(status_code=404, detail="找不到該專案。")
@@ -116,14 +130,14 @@ async def update(project_id: int, body: ProjectUpdate):
 
 
 @router.delete("/{project_id}", summary="刪除專案及其所有文件")
-async def remove(project_id: int):
-    # Delete all associated ChromaDB collections first
+async def remove(project_id: int, current_user: User = Depends(get_current_user)):
+    _check_project_ownership(project_id, current_user)
     docs = list_project_documents(project_id)
     for doc in docs:
         try:
             delete_document(doc.collection_name)
         except Exception:
-            pass
+            logging.exception("Failed to delete ChromaDB collection: %s", doc.collection_name)
 
     ok = db_delete_project(project_id)
     if not ok:
@@ -132,10 +146,8 @@ async def remove(project_id: int):
 
 
 @router.get("/{project_id}/documents", summary="列出專案內的文件")
-async def get_project_docs(project_id: int):
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="找不到該專案。")
+async def get_project_docs(project_id: int, current_user: User = Depends(get_current_user)):
+    project = _check_project_ownership(project_id, current_user)
     docs = list_project_documents(project_id)
     return {
         "documents": [

@@ -3,6 +3,7 @@ Application configuration loaded from environment variables.
 """
 import os
 import ssl
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -17,7 +18,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # ── LLM ──────────────────────────────────────────────────
-    llm_api_base_url: str = "https://172.16.120.35/v1"
+    llm_api_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = "nvidia/nemotron-3-nano-30b-a3b-fp8"
     embedding_model: str = "nvidia/nv-embed-v2"
@@ -25,6 +26,12 @@ class Settings(BaseSettings):
     # ── Data paths ───────────────────────────────────────────
     upload_dir: str = os.getenv("UPLOAD_DIR", "/data/uploads")
     chroma_db_dir: str = os.getenv("CHROMA_DB_DIR", "/data/chroma_db")
+
+    # ── Auth & CORS ────────────────────────────────────────
+    jwt_secret_key: str = ""
+    jwt_expiry_hours: int = 24
+    cors_origins: str = "http://localhost:3000,http://localhost:3100"
+    max_upload_size_mb: int = 50
 
     # ── RAG settings ─────────────────────────────────────────
     chunk_size: int = 512
@@ -37,6 +44,7 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
 

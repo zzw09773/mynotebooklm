@@ -207,6 +207,59 @@ def ingest_image(file_path: str, original_filename: str) -> dict:
     }
 
 
+def ingest_markdown(file_path: str, original_filename: str) -> dict:
+    """
+    Ingest a Markdown (.md) file by reading it as plain text,
+    chunking it, generating embeddings, and storing in ChromaDB.
+    """
+    with open(file_path, encoding="utf-8") as f:
+        text = f.read().strip()
+    if not text:
+        raise ValueError("Markdown 檔案內容為空。")
+
+    doc = Document(
+        text=text,
+        metadata={
+            "source_file": original_filename,
+            "file_path": file_path,
+            "page_number": 1,
+        },
+    )
+
+    splitter = SentenceSplitter(
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+    )
+    nodes = splitter.get_nodes_from_documents([doc])
+
+    doc_id = Path(file_path).stem
+    for i, node in enumerate(nodes):
+        node.metadata["doc_id"] = doc_id
+        node.metadata["chunk_index"] = i
+
+    chroma_client = _get_chroma_client()
+    collection_name = _sanitize_collection_name(doc_id)
+    chroma_collection = chroma_client.get_or_create_collection(name=collection_name)
+    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+    embed_model = get_embed_model()
+    VectorStoreIndex(
+        nodes=nodes,
+        storage_context=storage_context,
+        embed_model=embed_model,
+    )
+
+    return {
+        "doc_id": doc_id,
+        "collection_name": collection_name,
+        "filename": original_filename,
+        "total_pages": 1,
+        "total_chunks": len(nodes),
+        "file_path": file_path,
+    }
+
+
 # ── Document retrieval helpers ────────────────────────────────
 
 def list_collections() -> list[str]:

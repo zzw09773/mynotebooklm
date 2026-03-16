@@ -144,6 +144,26 @@ async def chat_with_rag(
             full_response += token
             yield _sse({"type": "token", "content": token})
 
+    # Generate AI follow-up suggestions (optional — failures are silently ignored)
+    try:
+        import re as _re
+        suggestion_msgs = messages[:-1] + [
+            ChatMessage(role=MessageRole.ASSISTANT, content=full_response[:800]),
+            ChatMessage(
+                role=MessageRole.USER,
+                content="根據以上問答，用JSON數組生成3個簡短後續問題（繁體中文），只輸出JSON數組，不要其他文字。",
+            ),
+        ]
+        suggestion_resp = await llm.achat(suggestion_msgs)
+        raw = suggestion_resp.message.content.strip()
+        match = _re.search(r"\[.*?\]", raw, _re.S)
+        if match:
+            suggestions = json.loads(match.group())
+            if isinstance(suggestions, list):
+                yield _sse({"type": "suggestions", "suggestions": [str(s) for s in suggestions[:3]]})
+    except Exception:
+        pass  # suggestions are optional; never break the main flow
+
     yield _sse({"type": "done"})
 
     # 6. Persist messages to DB if conversation_id is provided

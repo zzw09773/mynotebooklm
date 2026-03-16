@@ -78,8 +78,28 @@ body {
   @apply mb-2 pl-5;
 }
 
+.markdown-content ul {
+  list-style-type: disc;
+}
+
+.markdown-content ol {
+  list-style-type: decimal;
+}
+
 .markdown-content li {
   @apply mb-1;
+}
+
+.markdown-content table {
+  @apply w-full border-collapse mb-3 text-sm;
+}
+
+.markdown-content th {
+  @apply border border-dark-600 bg-dark-800 px-3 py-1.5 text-left font-semibold;
+}
+
+.markdown-content td {
+  @apply border border-dark-600 px-3 py-1.5;
 }
 
 .markdown-content code {

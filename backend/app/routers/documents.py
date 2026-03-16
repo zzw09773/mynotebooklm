@@ -1,6 +1,6 @@
 """
 Document management API routes – scoped to a project.
-Supports PDF and image (.jpg/.png) uploads with OCR.
+Supports PDF, image (.jpg/.png) uploads with OCR, and Markdown (.md) files.
 """
 import json
 import logging
@@ -27,6 +27,7 @@ from app.services.document_service import (
     save_uploaded_file,
     ingest_document,
     ingest_image,
+    ingest_markdown,
     delete_document,
     _sanitize_collection_name,
 )
@@ -35,7 +36,7 @@ from app.services.summary_service import generate_study_guide
 router = APIRouter(prefix="/api/documents", tags=["文件管理"])
 settings = get_settings()
 
-_ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
+_ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".md"}
 
 
 class DocumentInfo(BaseModel):
@@ -88,6 +89,8 @@ async def _process_document_background(
     try:
         if ext == ".pdf":
             result = ingest_document(file_path, filename)
+        elif ext == ".md":
+            result = ingest_markdown(file_path, filename)
         else:
             result = ingest_image(file_path, filename)
 

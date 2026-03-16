@@ -22,7 +22,7 @@ export function FlashcardsViewer({ data }: Props) {
 
     return (
         <div className="flex flex-col items-center gap-4">
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-[var(--text-muted)]">
                 {index + 1} / {total}　點擊卡片翻面
             </p>
 
@@ -42,20 +42,20 @@ export function FlashcardsViewer({ data }: Props) {
                 >
                     {/* Front */}
                     <div
-                        className="absolute inset-0 flex items-center justify-center rounded-xl border-2 border-blue-200 bg-blue-50 p-5 text-center"
+                        className="absolute inset-0 flex items-center justify-center rounded-xl border-2 border-blue-500/30 bg-blue-500/10 p-5 text-center"
                         style={{ backfaceVisibility: "hidden" }}
                     >
-                        <p className="text-gray-800 text-base font-medium leading-relaxed">{card.front}</p>
+                        <p className="text-[var(--text-primary)] text-base font-medium leading-relaxed">{card.front}</p>
                     </div>
                     {/* Back */}
                     <div
-                        className="absolute inset-0 flex items-center justify-center rounded-xl border-2 border-green-200 bg-green-50 p-5 text-center"
+                        className="absolute inset-0 flex items-center justify-center rounded-xl border-2 border-green-500/30 bg-green-500/10 p-5 text-center"
                         style={{
                             backfaceVisibility: "hidden",
                             transform: "rotateY(180deg)",
                         }}
                     >
-                        <p className="text-gray-800 text-sm leading-relaxed">{card.back}</p>
+                        <p className="text-[var(--text-primary)] text-sm leading-relaxed">{card.back}</p>
                     </div>
                 </div>
             </div>
@@ -65,23 +65,23 @@ export function FlashcardsViewer({ data }: Props) {
                 <button
                     onClick={() => goTo(Math.max(0, index - 1))}
                     disabled={index === 0}
-                    className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 disabled:opacity-30 transition-colors"
+                    className="p-2 rounded-lg bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-30 transition-colors"
                 >
-                    <ChevronLeft className="w-4 h-4" />
+                    <ChevronLeft className="w-4 h-4 text-[var(--text-secondary)]" />
                 </button>
                 <button
                     onClick={() => setFlipped(false)}
-                    className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors"
+                    className="p-2 rounded-lg bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] transition-colors"
                     title="重置翻面"
                 >
-                    <RotateCcw className="w-4 h-4" />
+                    <RotateCcw className="w-4 h-4 text-[var(--text-secondary)]" />
                 </button>
                 <button
                     onClick={() => goTo(Math.min(total - 1, index + 1))}
                     disabled={index === total - 1}
-                    className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 disabled:opacity-30 transition-colors"
+                    className="p-2 rounded-lg bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-30 transition-colors"
                 >
-                    <ChevronRight className="w-4 h-4" />
+                    <ChevronRight className="w-4 h-4 text-[var(--text-secondary)]" />
                 </button>
             </div>
         </div>

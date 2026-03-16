@@ -1,0 +1,118 @@
+<testsuites id="" name="" tests="34" failures="0" skipped="0" errors="0" time="122.475428">
+<testsuite name="01-login.spec.ts" timestamp="2026-03-16T06:57:06.873Z" hostname="chromium" tests="8" failures="0" skipped="0" time="14.74" errors="0">
+<testcase name="Login Flow › login page renders correctly" classname="01-login.spec.ts" time="1.648">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+<testcase name="Login Flow › shows error on invalid credentials" classname="01-login.spec.ts" time="1.613">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+<testcase name="Login Flow › shows error on wrong password" classname="01-login.spec.ts" time="1.524">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+<testcase name="Login Flow › successfully logs in with valid credentials" classname="01-login.spec.ts" time="2.39">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+<testcase name="Login Flow › unauthenticated user is redirected to /login" classname="01-login.spec.ts" time="1.646">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+<testcase name="Login Flow › register tab switches form correctly" classname="01-login.spec.ts" time="1.517">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+<testcase name="Login Flow › register with new user then auto-login" classname="01-login.spec.ts" time="2.158">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+<testcase name="Login Flow › logout navigates back to login page" classname="01-login.spec.ts" time="2.244">
+<system-err>
+<![CDATA[Register returned 409: {"detail":"此使用者名稱已被使用。"}
+]]>
+</system-err>
+</testcase>
+</testsuite>
+<testsuite name="02-project.spec.ts" timestamp="2026-03-16T06:57:06.873Z" hostname="chromium" tests="6" failures="0" skipped="0" time="25.161" errors="0">
+<testcase name="Project Creation and Selection › project dashboard renders after login" classname="02-project.spec.ts" time="3.991">
+</testcase>
+<testcase name="Project Creation and Selection › can create a new project" classname="02-project.spec.ts" time="4.342">
+</testcase>
+<testcase name="Project Creation and Selection › can create a project by pressing Enter" classname="02-project.spec.ts" time="4.176">
+</testcase>
+<testcase name="Project Creation and Selection › can open an existing project" classname="02-project.spec.ts" time="4.333">
+</testcase>
+<testcase name="Project Creation and Selection › can delete a project" classname="02-project.spec.ts" time="4.426">
+</testcase>
+<testcase name="Project Creation and Selection › empty state message when no projects exist" classname="02-project.spec.ts" time="3.893">
+<properties>
+<property name="info" value="1 pre-existing projects found; skipping empty state check">
+</property>
+</properties>
+</testcase>
+</testsuite>
+<testsuite name="03-document-upload.spec.ts" timestamp="2026-03-16T06:57:06.873Z" hostname="chromium" tests="5" failures="0" skipped="0" time="15.426" errors="0">
+<testcase name="Document Upload › upload area is visible in workspace" classname="03-document-upload.spec.ts" time="2.789">
+</testcase>
+<testcase name="Document Upload › can upload a markdown file" classname="03-document-upload.spec.ts" time="3.338">
+</testcase>
+<testcase name="Document Upload › document count increments after upload" classname="03-document-upload.spec.ts" time="3.3">
+</testcase>
+<testcase name="Document Upload › upload shows processing status" classname="03-document-upload.spec.ts" time="3.189">
+</testcase>
+<testcase name="Document Upload › document file input accepts markdown files" classname="03-document-upload.spec.ts" time="2.81">
+</testcase>
+</testsuite>
+<testsuite name="04-chat.spec.ts" timestamp="2026-03-16T06:57:06.873Z" hostname="chromium" tests="6" failures="0" skipped="0" time="29.063" errors="0">
+<testcase name="Chat Q&amp;A with Project › chat input and send button are visible in workspace" classname="04-chat.spec.ts" time="2.859">
+</testcase>
+<testcase name="Chat Q&amp;A with Project › typing in chat input updates the value" classname="04-chat.spec.ts" time="2.877">
+</testcase>
+<testcase name="Chat Q&amp;A with Project › sending a message creates a conversation entry" classname="04-chat.spec.ts" time="3.118">
+</testcase>
+<testcase name="Chat Q&amp;A with Project › sending a message shows streaming response" classname="04-chat.spec.ts" time="8.115">
+</testcase>
+<testcase name="Chat Q&amp;A with Project › multiple messages create a conversation history" classname="04-chat.spec.ts" time="9.039">
+</testcase>
+<testcase name="Chat Q&amp;A with Project › new conversation button clears chat area" classname="04-chat.spec.ts" time="3.055">
+</testcase>
+</testsuite>
+<testsuite name="05-conversation-history.spec.ts" timestamp="2026-03-16T06:57:06.873Z" hostname="chromium" tests="5" failures="0" skipped="0" time="18.625" errors="0">
+<testcase name="Conversation History Loading › conversations appear in sidebar after chat message sent" classname="05-conversation-history.spec.ts" time="2.882">
+</testcase>
+<testcase name="Conversation History Loading › clicking a conversation loads its messages (API-seeded)" classname="05-conversation-history.spec.ts" time="4.635">
+</testcase>
+<testcase name="Conversation History Loading › switching between conversations shows correct messages (API-seeded)" classname="05-conversation-history.spec.ts" time="4.789">
+</testcase>
+<testcase name="Conversation History Loading › active conversation is highlighted in sidebar" classname="05-conversation-history.spec.ts" time="3.105">
+</testcase>
+<testcase name="Conversation History Loading › deleted conversation is removed from sidebar" classname="05-conversation-history.spec.ts" time="3.214">
+</testcase>
+</testsuite>
+<testsuite name="06-project-isolation.spec.ts" timestamp="2026-03-16T06:57:06.873Z" hostname="chromium" tests="4" failures="0" skipped="0" time="17.578" errors="0">
+<testcase name="Project Switching - Conversation Isolation › conversations from project A do not appear in project B" classname="06-project-isolation.spec.ts" time="3.355">
+</testcase>
+<testcase name="Project Switching - Conversation Isolation › switching back to project A restores its conversations (API-seeded)" classname="06-project-isolation.spec.ts" time="6.247">
+</testcase>
+<testcase name="Project Switching - Conversation Isolation › document list is isolated per project" classname="06-project-isolation.spec.ts" time="3.155">
+</testcase>
+<testcase name="Project Switching - Conversation Isolation › chat area is cleared when switching between projects (API-seeded)" classname="06-project-isolation.spec.ts" time="4.821">
+</testcase>
+</testsuite>
+</testsuites>

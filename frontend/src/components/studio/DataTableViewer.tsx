@@ -10,16 +10,16 @@ export function DataTableViewer({ data }: Props) {
     return (
         <div className="flex flex-col gap-3">
             {data.title && (
-                <h3 className="font-semibold text-base text-gray-800">{data.title}</h3>
+                <h3 className="font-semibold text-base text-[var(--text-primary)]">{data.title}</h3>
             )}
-            <div className="overflow-auto max-h-[480px] rounded border border-gray-200">
+            <div className="overflow-auto max-h-[480px] rounded border border-[var(--border-default)]">
                 <table className="min-w-full text-sm">
-                    <thead className="sticky top-0 bg-gray-100">
+                    <thead className="sticky top-0 bg-[var(--bg-card)]">
                         <tr>
                             {data.headers.map((h, i) => (
                                 <th
                                     key={i}
-                                    className="px-3 py-2 text-left font-semibold text-gray-700 whitespace-nowrap border-b border-gray-200"
+                                    className="px-3 py-2 text-left font-semibold text-[var(--text-secondary)] whitespace-nowrap border-b border-[var(--border-default)]"
                                 >
                                     {h}
                                 </th>
@@ -30,12 +30,12 @@ export function DataTableViewer({ data }: Props) {
                         {data.rows.map((row, ri) => (
                             <tr
                                 key={ri}
-                                className={ri % 2 === 0 ? "bg-white" : "bg-gray-50"}
+                                className={ri % 2 === 0 ? "bg-transparent" : "bg-white/5"}
                             >
                                 {row.map((cell, ci) => (
                                     <td
                                         key={ci}
-                                        className="px-3 py-2 text-gray-700 border-b border-gray-100"
+                                        className="px-3 py-2 text-[var(--text-secondary)] border-b border-[var(--border-default)]"
                                     >
                                         {cell}
                                     </td>

@@ -95,13 +95,18 @@ export function Sidebar({
                         <FileUp className="w-6 h-6 text-[var(--text-muted)]" />
                     )}
                     <span className="text-sm text-[var(--text-secondary)]">
-                        {isUploading ? "正在處理文件..." : "點擊或拖曳上傳 PDF / 圖片"}
+                        {isUploading ? "正在處理文件..." : "點擊或拖曳上傳文件"}
                     </span>
+                    {!isUploading && (
+                        <span className="text-xs text-[var(--text-muted)]">
+                            支援 PDF、圖片（JPG / PNG）、Markdown（.md）
+                        </span>
+                    )}
                 </div>
                 <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".pdf,.jpg,.jpeg,.png"
+                    accept=".pdf,.jpg,.jpeg,.png,.md"
                     multiple
                     className="hidden"
                     onChange={(e) => e.target.files && onUpload(e.target.files)}

@@ -220,6 +220,8 @@ function MindMapCanvas({ data, collapsed, onToggle, onAskQuestion, className = "
     const [offset, setOffset] = useState({ x: 0, y: 0 });
     const [scale, setScale] = useState(1);
     const dragging = useRef(false);
+    const didMove = useRef(false);
+    const startPos = useRef({ x: 0, y: 0 });
     const lastPos = useRef({ x: 0, y: 0 });
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -236,19 +238,49 @@ function MindMapCanvas({ data, collapsed, onToggle, onAskQuestion, className = "
     const layout = layoutTree(data.root, rootX, 40, svgH - 40, 0, collapsed, "root", 0);
     const elements = buildElements(layout, null, onToggle, onAskQuestion);
 
-    const onMouseDown = useCallback((e: React.MouseEvent) => {
-        dragging.current = true;
-        lastPos.current = { x: e.clientX, y: e.clientY };
+    // Use native addEventListener to bypass React synthetic event stopPropagation
+    // from SVG node onClick handlers, which would otherwise block mousedown bubbling.
+    useEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+
+        const handleDown = (e: MouseEvent) => {
+            if (e.button !== 0) return;
+            dragging.current = true;
+            didMove.current = false;
+            startPos.current = { x: e.clientX, y: e.clientY };
+            lastPos.current = { x: e.clientX, y: e.clientY };
+            e.preventDefault();
+        };
+        const handleMove = (e: MouseEvent) => {
+            if (!dragging.current) return;
+            // Only start moving after a 3px threshold to distinguish drag from click
+            const totalDx = Math.abs(e.clientX - startPos.current.x);
+            const totalDy = Math.abs(e.clientY - startPos.current.y);
+            if (!didMove.current && totalDx + totalDy < 3) return;
+            didMove.current = true;
+            const dx = e.clientX - lastPos.current.x;
+            const dy = e.clientY - lastPos.current.y;
+            setOffset((o) => ({ x: o.x + dx, y: o.y + dy }));
+            lastPos.current = { x: e.clientX, y: e.clientY };
+        };
+        const handleUp = () => { dragging.current = false; };
+        // Intercept click in capture phase to suppress node toggle after a drag
+        const handleClick = (e: Event) => {
+            if (didMove.current) { e.stopPropagation(); e.preventDefault(); }
+        };
+
+        el.addEventListener("mousedown", handleDown);
+        el.addEventListener("click", handleClick, true);
+        window.addEventListener("mousemove", handleMove);
+        window.addEventListener("mouseup", handleUp);
+        return () => {
+            el.removeEventListener("mousedown", handleDown);
+            el.removeEventListener("click", handleClick, true);
+            window.removeEventListener("mousemove", handleMove);
+            window.removeEventListener("mouseup", handleUp);
+        };
     }, []);
-    const onMouseMove = useCallback((e: React.MouseEvent) => {
-        if (!dragging.current) return;
-        setOffset((o) => ({
-            x: o.x + e.clientX - lastPos.current.x,
-            y: o.y + e.clientY - lastPos.current.y,
-        }));
-        lastPos.current = { x: e.clientX, y: e.clientY };
-    }, []);
-    const onMouseUp = useCallback(() => { dragging.current = false; }, []);
 
     // Non-passive wheel for zoom
     useEffect(() => {
@@ -265,11 +297,7 @@ function MindMapCanvas({ data, collapsed, onToggle, onAskQuestion, className = "
     return (
         <div
             ref={containerRef}
-            className={`overflow-hidden bg-slate-50 cursor-grab active:cursor-grabbing ${className}`}
-            onMouseDown={onMouseDown}
-            onMouseMove={onMouseMove}
-            onMouseUp={onMouseUp}
-            onMouseLeave={onMouseUp}
+            className={`overflow-hidden bg-[var(--bg-card)] cursor-grab active:cursor-grabbing ${className}`}
         >
             <svg
                 width="100%" height="100%"
@@ -315,13 +343,13 @@ export function MindMapViewer({ data, onAskQuestion }: Props) {
     return (
         <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
-                <p className="text-xs text-gray-400">{hint}</p>
+                <p className="text-xs text-[var(--text-muted)]">{hint}</p>
                 <button
                     onClick={() => setFullscreen(true)}
-                    className="p-1.5 rounded hover:bg-gray-100 transition-colors"
+                    className="p-1.5 rounded hover:bg-[var(--bg-hover)] transition-colors"
                     title="全螢幕展開"
                 >
-                    <Maximize2 className="w-4 h-4 text-gray-500" />
+                    <Maximize2 className="w-4 h-4 text-[var(--text-muted)]" />
                 </button>
             </div>
 
@@ -330,26 +358,26 @@ export function MindMapViewer({ data, onAskQuestion }: Props) {
                 collapsed={collapsed}
                 onToggle={onToggle}
                 onAskQuestion={onAskQuestion}
-                className="rounded-xl border border-gray-200 h-[380px]"
+                className="rounded-xl border border-[var(--border-default)] h-[380px]"
             />
 
             {mounted && fullscreen && createPortal(
                 <div
-                    className="fixed inset-0 z-50 flex flex-col bg-white"
+                    className="fixed inset-0 z-50 flex flex-col bg-[var(--bg-primary)]"
                     role="dialog"
                     aria-modal="true"
                     aria-label="心智圖全螢幕"
                 >
-                    <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 flex-shrink-0">
-                        <span className="font-semibold text-gray-800">心智圖</span>
+                    <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--border-default)] flex-shrink-0">
+                        <span className="font-semibold text-[var(--text-primary)]">心智圖</span>
                         <div className="flex items-center gap-3">
-                            <span className="text-xs text-gray-400">{hint}</span>
+                            <span className="text-xs text-[var(--text-muted)]">{hint}</span>
                             <button
                                 onClick={() => setFullscreen(false)}
-                                className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
+                                className="p-2 rounded-lg hover:bg-[var(--bg-hover)] transition-colors"
                                 aria-label="關閉全螢幕"
                             >
-                                <X className="w-5 h-5 text-gray-600" />
+                                <X className="w-5 h-5 text-[var(--text-muted)]" />
                             </button>
                         </div>
                     </div>

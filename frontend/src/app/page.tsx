@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import {
     fetchProjects, fetchSettings, fetchDocuments, fetchConversations,
@@ -40,6 +40,13 @@ export default function NotebookLMPage() {
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const [expandedGuide, setExpandedGuide] = useState<string | null>(null);
     const [summaries, setSummaries] = useState<Record<string, SummaryInfo>>({});
+    const [followUpSuggestions, setFollowUpSuggestions] = useState<string[]>([]);
+
+    // ── Computed FAQs from all loaded summaries ────────────
+    const docFaqs = useMemo(
+        () => Object.values(summaries).flatMap((s) => s.status === "done" ? s.faqs : []),
+        [summaries],
+    );
 
     // ── Studio state ───────────────────────────────────────
     const [showStudio, setShowStudio] = useState(false);
@@ -66,14 +73,22 @@ export default function NotebookLMPage() {
 
     // ── Load on project change ─────────────────────────────
     useEffect(() => {
-        if (!activeProject) {
-            setDocuments([]); setMessages([]); setSummaries([]);
-            setConversations([]); setActiveConversation(null);
-            return;
-        }
-        fetchDocuments(activeProject.id).then(setDocuments).catch(() => {});
-        fetchConversations(activeProject.id).then(setConversations).catch(() => {});
-        setMessages([]);
+        // Always clear cross-project state immediately (including activeConversation)
+        setDocuments([]); setMessages([]); setSummaries({});
+        setConversations([]); setActiveConversation(null);
+
+        if (!activeProject) return;
+
+        // Cancellation flag prevents stale fetches from a previous project
+        // overwriting state after the user has already switched projects
+        let cancelled = false;
+        fetchDocuments(activeProject.id)
+            .then((docs) => { if (!cancelled) setDocuments(docs); })
+            .catch(() => {});
+        fetchConversations(activeProject.id)
+            .then((convs) => { if (!cancelled) setConversations(convs); })
+            .catch(() => {});
+        return () => { cancelled = true; };
     }, [activeProject]);
 
     // ── Upload ─────────────────────────────────────────────
@@ -109,6 +124,7 @@ export default function NotebookLMPage() {
         if (!query.trim() || isStreaming) return;
         setInputValue("");
         setErrorMsg(null);
+        setFollowUpSuggestions([]);
 
         setMessages((prev: ChatMessage[]) => [...prev, { role: "user", content: query }]);
         setMessages((prev: ChatMessage[]) => [...prev, { role: "assistant", content: "", citations: [] }]);
@@ -127,20 +143,25 @@ export default function NotebookLMPage() {
                 if (event.type === "citations") {
                     setMessages((prev: ChatMessage[]) => {
                         const msgs = [...prev];
+                        if (!msgs.length) return prev;
                         msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], citations: event.citations };
                         return msgs;
                     });
                 } else if (event.type === "token" && event.content) {
                     setMessages((prev: ChatMessage[]) => {
                         const msgs = [...prev];
+                        if (!msgs.length) return prev;
                         msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: msgs[msgs.length - 1].content + event.content };
                         return msgs;
                     });
+                } else if (event.type === "suggestions" && event.suggestions) {
+                    setFollowUpSuggestions(event.suggestions);
                 }
             }
         } catch (e: unknown) {
             setMessages((prev: ChatMessage[]) => {
                 const msgs = [...prev];
+                if (!msgs.length) return prev;
                 msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: "⚠️ 發生錯誤：" + (e instanceof Error ? e.message : "無法連線到後端服務") };
                 return msgs;
             });
@@ -152,6 +173,21 @@ export default function NotebookLMPage() {
     const handleSend = useCallback(() => {
         sendMessage(inputValue.trim());
     }, [inputValue, sendMessage]);
+
+    // ── Message edit / delete ──────────────────────────────
+    const handleEditMessage = useCallback((index: number, newContent: string) => {
+        setMessages((prev) => prev.slice(0, index));
+        sendMessage(newContent);
+    }, [sendMessage]);
+
+    const handleDeleteMessage = useCallback((index: number) => {
+        setMessages((prev) => {
+            const next = [...prev];
+            const count = (index + 1 < next.length && next[index + 1].role === "assistant") ? 2 : 1;
+            next.splice(index, count);
+            return next;
+        });
+    }, []);
 
     // ── Conversation ───────────────────────────────────────
     const loadConversation = useCallback(async (conv: ConversationInfo) => {
@@ -260,12 +296,16 @@ export default function NotebookLMPage() {
                 sidebarOpen={sidebarOpen}
                 documents={documents}
                 settings={settings}
+                docFaqs={docFaqs}
                 onSend={handleSend}
                 onInputChange={setInputValue}
                 onErrorDismiss={() => setErrorMsg(null)}
                 onOpenSidebar={() => setSidebarOpen(true)}
                 onOpenSettings={handleOpenSettings}
                 onOpenStudio={() => setShowStudio(true)}
+                onEditMessage={handleEditMessage}
+                onDeleteMessage={handleDeleteMessage}
+                followUpSuggestions={followUpSuggestions}
             />
 
             {showStudio && activeProject && (

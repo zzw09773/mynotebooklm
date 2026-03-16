@@ -53,7 +53,7 @@ function BarChart({ data }: { data: InfographicContent }) {
                             y={PADDING.top + chartH + 14}
                             textAnchor="middle"
                             fontSize="10"
-                            fill="#374151"
+                            fill="#94a3b8"
                         >
                             {label.length > 6 ? label.slice(0, 6) + "…" : label}
                         </text>
@@ -106,7 +106,7 @@ function PieChart({ data }: { data: InfographicContent }) {
             {slices.map((s, i) => (
                 <g key={i} transform={`translate(195, ${20 + i * 22})`}>
                     <rect x={0} y={0} width={12} height={12} fill={s.color} rx="2" />
-                    <text x={16} y={10} fontSize="10" fill="#374151">
+                    <text x={16} y={10} fontSize="10" fill="#94a3b8">
                         {s.label.slice(0, 8)} ({s.pct}%)
                     </text>
                 </g>
@@ -164,7 +164,7 @@ function LineChart({ data }: { data: InfographicContent }) {
                     y={PADDING.top + chartH + 14}
                     textAnchor="middle"
                     fontSize="10"
-                    fill="#374151"
+                    fill="#94a3b8"
                 >
                     {label.length > 5 ? label.slice(0, 5) + "…" : label}
                 </text>
@@ -180,15 +180,15 @@ export function InfographicViewer({ data }: Props) {
 
     return (
         <div className="flex flex-col gap-3">
-            <h3 className="font-semibold text-sm text-gray-700 text-center">{data.title}</h3>
-            <div className="bg-white rounded-xl border border-gray-200 p-3">
+            <h3 className="font-semibold text-sm text-[var(--text-secondary)] text-center">{data.title}</h3>
+            <div className="bg-[var(--bg-card)] rounded-xl border border-[var(--border-default)] p-3">
                 <Chart data={data} />
             </div>
             {/* Legend for bar/line */}
             {data.chart_type !== "pie" && data.datasets.length > 1 && (
                 <div className="flex flex-wrap gap-3 justify-center">
                     {data.datasets.map((ds, i) => (
-                        <div key={i} className="flex items-center gap-1.5 text-xs text-gray-600">
+                        <div key={i} className="flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
                             <span className="w-3 h-3 rounded-full" style={{ background: COLORS[i % COLORS.length] }} />
                             {ds.label}
                         </div>

@@ -92,7 +92,7 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
             case "datatable":
                 return <DataTableViewer data={data as DataTableContent} />;
             default:
-                return <pre className="text-xs whitespace-pre-wrap text-gray-600">{artifact.content_text || artifact.content_json}</pre>;
+                return <pre className="text-xs whitespace-pre-wrap text-[var(--text-secondary)]">{artifact.content_text || artifact.content_json}</pre>;
         }
     } catch {
         return <pre className="text-xs whitespace-pre-wrap text-gray-600">{artifact.content_text}</pre>;
@@ -122,12 +122,12 @@ function GridCard({
 
     const borderCls =
         status === "done"
-            ? "border-green-300 bg-green-50 hover:bg-green-100"
+            ? "border-green-500/40 bg-green-500/10 hover:bg-green-500/20"
             : status === "error"
-            ? "border-red-300 bg-red-50 hover:bg-red-100"
+            ? "border-red-500/40 bg-red-500/10 hover:bg-red-500/20"
             : status === "generating"
-            ? "border-blue-300 bg-blue-50"
-            : "border-gray-200 bg-white hover:bg-gray-50";
+            ? "border-blue-500/40 bg-blue-500/10"
+            : "border-[var(--border-default)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)]";
 
     return (
         <button
@@ -138,8 +138,8 @@ function GridCard({
             {badge() && (
                 <span className="absolute top-1.5 right-1.5">{badge()}</span>
             )}
-            <Icon className="w-5 h-5 text-gray-600" />
-            <span className="text-xs text-gray-700 font-medium">{config.label}</span>
+            <Icon className="w-5 h-5 text-[var(--text-muted)]" />
+            <span className="text-xs text-[var(--text-secondary)] font-medium">{config.label}</span>
         </button>
     );
 }
@@ -219,36 +219,36 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
     const selectedArtifact = selected ? artifacts[selected] : undefined;
 
     return (
-        <div className="flex flex-col h-full w-[480px] flex-shrink-0 border-l border-gray-200 bg-white">
+        <div className="flex flex-col h-full w-[480px] flex-shrink-0 border-l border-[var(--border-default)] bg-[var(--bg-secondary)]">
             {/* Header */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-default)]">
                 {selected ? (
                     <button
                         onClick={() => setSelected(null)}
-                        className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 transition-colors"
+                        className="flex items-center gap-1.5 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                     >
                         <ChevronLeft className="w-4 h-4" />
                         {CONFIGS.find((c) => c.type === selected)?.label}
                     </button>
                 ) : (
-                    <h2 className="font-semibold text-gray-800">工作室</h2>
+                    <h2 className="font-semibold text-[var(--text-primary)]">工作室</h2>
                 )}
                 <div className="flex items-center gap-2">
                     {selected && (
                         <button
                             onClick={() => triggerGenerate(selected, true)}
                             title="重新生成"
-                            className="p-1.5 rounded hover:bg-gray-100 transition-colors"
+                            className="p-1.5 rounded hover:bg-[var(--bg-hover)] transition-colors"
                         >
-                            <RefreshCw className="w-4 h-4 text-gray-500" />
+                            <RefreshCw className="w-4 h-4 text-[var(--text-muted)]" />
                         </button>
                     )}
                     <button
                         onClick={onClose}
-                        className="p-1.5 rounded hover:bg-gray-100 transition-colors"
+                        className="p-1.5 rounded hover:bg-[var(--bg-hover)] transition-colors"
                         aria-label="關閉工作室"
                     >
-                        <X className="w-4 h-4 text-gray-500" />
+                        <X className="w-4 h-4 text-[var(--text-muted)]" />
                     </button>
                 </div>
             </div>
@@ -256,19 +256,19 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
             {/* Body */}
             <div className="flex-1 overflow-y-auto p-4">
                 {error && (
-                    <div className="mb-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                    <div className="mb-3 rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-sm text-red-400">
                         {error}
                     </div>
                 )}
 
                 {selected && selectedArtifact ? (
                     selectedArtifact.status === "generating" ? (
-                        <div className="flex flex-col items-center gap-3 py-16 text-gray-500">
+                        <div className="flex flex-col items-center gap-3 py-16 text-[var(--text-muted)]">
                             <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
                             <p className="text-sm">正在生成中，請稍候…</p>
                         </div>
                     ) : selectedArtifact.status === "error" ? (
-                        <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-sm text-red-700">
+                        <div className="rounded-lg bg-red-500/10 border border-red-500/30 p-4 text-sm text-red-400">
                             生成失敗：{selectedArtifact.error_message}
                         </div>
                     ) : (
@@ -276,7 +276,7 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
                     )
                 ) : (
                     <>
-                        <p className="text-xs text-gray-500 mb-3">
+                        <p className="text-xs text-[var(--text-muted)] mb-3">
                             點擊格子生成 AI 內容；完成後再次點擊查看。
                         </p>
                         <div className="grid grid-cols-3 gap-3">

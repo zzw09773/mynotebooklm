@@ -18,7 +18,7 @@ export function QuizViewer({ data }: Props) {
     const total = data.questions.length;
 
     const handleSelect = (idx: number) => {
-        if (selected !== null) return; // already answered
+        if (selected !== null) return;
         setSelected(idx);
         setShowExpl(true);
         if (idx === question.answer) setScore((s) => s + 1);
@@ -45,10 +45,10 @@ export function QuizViewer({ data }: Props) {
     if (finished) {
         return (
             <div className="flex flex-col items-center gap-4 py-8">
-                <p className="text-2xl font-bold text-gray-800">
+                <p className="text-2xl font-bold text-[var(--text-primary)]">
                     {score} / {total}
                 </p>
-                <p className="text-gray-500 text-sm">
+                <p className="text-[var(--text-muted)] text-sm">
                     {score === total ? "完美！全部答對 🎉" : score >= total * 0.7 ? "答得不錯！" : "繼續加油！"}
                 </p>
                 <button
@@ -65,28 +65,28 @@ export function QuizViewer({ data }: Props) {
         <div className="flex flex-col gap-4">
             {/* Progress */}
             <div className="flex items-center gap-2">
-                <div className="flex-1 h-1.5 rounded-full bg-gray-200">
+                <div className="flex-1 h-1.5 rounded-full bg-[var(--bg-card)]">
                     <div
                         className="h-1.5 rounded-full bg-blue-400 transition-all"
                         style={{ width: `${((current + 1) / total) * 100}%` }}
                     />
                 </div>
-                <span className="text-xs text-gray-500 whitespace-nowrap">{current + 1} / {total}</span>
+                <span className="text-xs text-[var(--text-muted)] whitespace-nowrap">{current + 1} / {total}</span>
             </div>
 
-            <p className="font-semibold text-gray-800 text-base leading-relaxed">{question.q}</p>
+            <p className="font-semibold text-[var(--text-primary)] text-base leading-relaxed">{question.q}</p>
 
             <div className="flex flex-col gap-2">
                 {question.options.map((opt, i) => {
                     let cls = "rounded-lg border px-4 py-3 text-sm text-left transition-colors ";
                     if (selected === null) {
-                        cls += "border-gray-200 hover:border-blue-300 hover:bg-blue-50 cursor-pointer";
+                        cls += "border-[var(--border-default)] text-[var(--text-secondary)] hover:border-blue-500/50 hover:bg-blue-500/10 cursor-pointer";
                     } else if (i === question.answer) {
-                        cls += "border-green-400 bg-green-50 text-green-800 font-medium";
+                        cls += "border-green-500/50 bg-green-500/10 text-green-400 font-medium";
                     } else if (i === selected) {
-                        cls += "border-red-400 bg-red-50 text-red-700";
+                        cls += "border-red-500/50 bg-red-500/10 text-red-400";
                     } else {
-                        cls += "border-gray-200 text-gray-500";
+                        cls += "border-[var(--border-default)] text-[var(--text-muted)]";
                     }
                     return (
                         <button key={i} className={cls} onClick={() => handleSelect(i)}>
@@ -98,7 +98,7 @@ export function QuizViewer({ data }: Props) {
             </div>
 
             {showExpl && (
-                <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800">
+                <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-sm text-amber-400">
                     <span className="font-semibold">解析：</span>{question.explanation}
                 </div>
             )}

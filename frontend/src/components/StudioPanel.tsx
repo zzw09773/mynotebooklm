@@ -58,11 +58,12 @@ type ArtifactMap = Partial<Record<ArtifactType, StudioArtifact>>;
 interface Props {
     activeProject: ProjectInfo;
     onClose: () => void;
+    onAskQuestion?: (question: string) => void;
 }
 
 // ── Viewer dispatcher ─────────────────────────────────────────
 
-function ArtifactViewer({ artifact }: { artifact: StudioArtifact }) {
+function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact; onAskQuestion?: (q: string) => void }) {
     if (artifact.status !== "done") return null;
 
     if (artifact.artifact_type === "video_script" || artifact.artifact_type === "report") {
@@ -81,7 +82,7 @@ function ArtifactViewer({ artifact }: { artifact: StudioArtifact }) {
             case "slides":
                 return <SlidesViewer data={data as SlidesContent} />;
             case "mindmap":
-                return <MindMapViewer data={data as MindMapContent} />;
+                return <MindMapViewer data={data as MindMapContent} onAskQuestion={onAskQuestion} />;
             case "flashcards":
                 return <FlashcardsViewer data={data as FlashcardsContent} />;
             case "quiz":
@@ -145,7 +146,7 @@ function GridCard({
 
 // ── Main panel ────────────────────────────────────────────────
 
-export function StudioPanel({ activeProject, onClose }: Props) {
+export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
     const [artifacts, setArtifacts] = useState<ArtifactMap>({});
     const [selected, setSelected] = useState<ArtifactType | null>(null);
     const [error, setError] = useState("");
@@ -283,7 +284,7 @@ export function StudioPanel({ activeProject, onClose }: Props) {
                             生成失敗：{selectedArtifact.error_message}
                         </div>
                     ) : (
-                        <ArtifactViewer artifact={selectedArtifact} />
+                        <ArtifactViewer artifact={selectedArtifact} onAskQuestion={onAskQuestion} />
                     )
                 ) : (
                     <>

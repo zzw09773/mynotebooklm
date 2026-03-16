@@ -107,9 +107,8 @@ export default function NotebookLMPage() {
     }, [activeProject]);
 
     // ── Chat ───────────────────────────────────────────────
-    const handleSend = useCallback(async () => {
-        const query = inputValue.trim();
-        if (!query || isStreaming) return;
+    const sendMessage = useCallback(async (query: string) => {
+        if (!query.trim() || isStreaming) return;
         setInputValue("");
         setErrorMsg(null);
 
@@ -150,7 +149,11 @@ export default function NotebookLMPage() {
         } finally {
             setIsStreaming(false);
         }
-    }, [inputValue, isStreaming, activeProject, activeConversation, messages]);
+    }, [isStreaming, activeProject, activeConversation, messages]);
+
+    const handleSend = useCallback(() => {
+        sendMessage(inputValue.trim());
+    }, [inputValue, sendMessage]);
 
     // ── Conversation ───────────────────────────────────────
     const loadConversation = useCallback(async (conv: ConversationInfo) => {
@@ -271,6 +274,7 @@ export default function NotebookLMPage() {
                 <StudioPanel
                     activeProject={activeProject}
                     onClose={() => setShowStudio(false)}
+                    onAskQuestion={(q) => { setShowStudio(false); sendMessage(q); }}
                 />
             )}
 

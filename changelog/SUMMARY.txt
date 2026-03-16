@@ -1,0 +1,229 @@
+# 📊 NotebookLM 變更記錄摘要
+
+## 🎯 快速概覽
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│          NotebookLM 版本歷史和改動摘要                      │
+└─────────────────────────────────────────────────────────────┘
+
+v0.0.1 (2026-03-14) - Studio 工作室功能
+├─ 分支：工作室功能v0.0.1
+├─ Commit：91ea558
+├─ 檔案數：17
+├─ 新增行：1,665
+├─ 刪除行：3
+└─ 主要內容：
+   ✓ StudioPanel 主組件
+   ✓ 9 種 Artifact 查看器
+   ✓ Studio API 後端服務
+   ✓ 實時狀態輪詢機制
+
+v0.0.0 (2026-03-14) - 認證與安全性
+├─ 分支：main
+├─ Commit：534ef5b
+├─ 檔案數：30
+├─ 新增行：2,346
+├─ 刪除行：1,233
+└─ 主要內容：
+   ✓ 使用者認證系統
+   ✓ CORS 和 IDOR 修復
+   ✓ 檔案上傳限制
+   ✓ 完整的測試套件
+```
+
+---
+
+## 📂 Changelog 資料夾結構
+
+```
+changelog/
+├── README.md
+│   └─ 詳細的 changelog 指南和最佳實踐
+│
+├── CHANGELOG_v0.0.1_studio.md (251 行)
+│   └─ Studio 工作室功能的詳細變更說明
+│
+├── CHANGES_v0.0.0_auth-and-security.md (192 行)
+│   └─ 認證與安全性功能的詳細變更說明
+│
+├── studio-feature-v0.0.1.diff (1,832 行)
+│   └─ Studio 功能的完整代碼差異
+│
+└── SUMMARY.txt (本文件)
+    └─ 快速參考摘要
+```
+
+---
+
+## 🔍 檔案說明
+
+### 📄 CHANGELOG_v0.0.1_studio.md
+**用途：** 快速了解 Studio 功能更新  
+**內容：**
+- 功能概述
+- 9 種 artifact 類型詳述
+- 新增的數據模型和 API
+- 前端組件結構
+- 測試建議和部署注意事項
+
+**快速訪問：**
+```bash
+cat changelog/CHANGELOG_v0.0.1_studio.md
+```
+
+### 📄 CHANGES_v0.0.0_auth-and-security.md
+**用途：** 了解認證和安全性改進  
+**內容：**
+- 安全性修補詳述（5 項）
+- 後端 Bug 修正（3 項）
+- 認證系統實現
+- 測試覆蓋
+
+**快速訪問：**
+```bash
+cat changelog/CHANGES_v0.0.0_auth-and-security.md
+```
+
+### 🔀 studio-feature-v0.0.1.diff
+**用途：** 進行詳細的代碼審查  
+**內容：**
+- 完整的 diff 格式化改動
+- 所有新增和修改的代碼
+- 行級別的差異
+
+**快速訪問：**
+```bash
+# 查看完整 diff
+cat changelog/studio-feature-v0.0.1.diff
+
+# 查看統計摘要
+diffstat changelog/studio-feature-v0.0.1.diff
+
+# 應用 diff 到其他分支
+git apply changelog/studio-feature-v0.0.1.diff
+
+# 審查特定檔案的改動
+grep -A 20 "studio.py" changelog/studio-feature-v0.0.1.diff
+```
+
+---
+
+## 📊 改動統計一覽
+
+| 版本 | 功能 | 日期 | 分支 | 檔案 | 新增行 | 刪除行 | Diff 大小 |
+|------|------|------|------|------|--------|--------|----------|
+| 0.0.1 | Studio | 2026-03-14 | 工作室功能v0.0.1 | 17 | 1,665 | 3 | 70 KB |
+| 0.0.0 | 認證 & 安全 | 2026-03-14 | main | 30 | 2,346 | 1,233 | - |
+
+---
+
+## 🚀 使用場景
+
+### 場景 1：我想快速了解 v0.0.1 有什麼新功能
+```bash
+cd changelog
+head -100 CHANGELOG_v0.0.1_studio.md
+```
+
+### 場景 2：我要進行代碼審查
+```bash
+# 在編輯器中打開 diff
+code changelog/studio-feature-v0.0.1.diff
+
+# 或在終端查看
+less changelog/studio-feature-v0.0.1.diff
+```
+
+### 場景 3：我要應用這個改動到另一個分支
+```bash
+git checkout another-branch
+git apply changelog/studio-feature-v0.0.1.diff
+```
+
+### 場景 4：我要查看某個檔案在 v0.0.1 的改動
+```bash
+grep -B 5 -A 30 "StudioPanel.tsx" changelog/studio-feature-v0.0.1.diff
+```
+
+---
+
+## 📝 新增 Changelog 的快速步驟
+
+當有新功能發佈時：
+
+```bash
+# 1. 生成 changelog markdown
+cat > changelog/CHANGELOG_v[version]_[feature].md << 'EOF'
+# NotebookLM [Feature Name] v[version]
+
+**版本：** v[version]
+**日期：** [date]
+**分支：** `[branch-name]`
+
+---
+
+## 概述
+
+[Description]
+
+---
+
+## 改動檔案
+
+[List of files]
+EOF
+
+# 2. 生成 diff 檔
+git diff main..current-branch > changelog/[feature]-v[version].diff
+
+# 3. 更新 README.md（本文件）
+# 添加新版本記錄
+
+# 4. 完成！
+git add changelog/
+git commit -m "docs: add changelog for v[version]"
+```
+
+---
+
+## 💡 最佳實踐
+
+✅ **務必做：**
+- 每個版本發佈時建立新的 changelog
+- 保留完整的 diff 檔以供審查
+- 使用清晰的版本命名 (v[major].[minor].[patch])
+- 在 markdown 中包含統計數據
+
+❌ **不應該做：**
+- 刪除舊的 changelog 記錄
+- 修改已發佈版本的 changelog
+- 只保留 diff 不保留 markdown 說明
+- 使用不一致的命名約定
+
+---
+
+## 🎯 相關資源
+
+| 資源 | 位置 |
+|------|------|
+| Changelog 指南 | `changelog/README.md` |
+| 項目根目錄 | `/home/aia/c1147259/project/notebooklm/` |
+| 主要分支 | `origin/main` |
+| Studio 分支 | `origin/工作室功能v0.0.1` |
+
+---
+
+## 📅 更新歷史
+
+- **2026-03-14** - 初始建立 changelog 資料夾和文檔體系
+  - 建立 changelog 資料夾結構
+  - 生成 v0.0.1 Studio feature changelog
+  - 移動 v0.0.0 auth changelog
+  - 建立 README 和摘要
+
+---
+
+**提示：** 使用 `cat changelog/README.md` 獲取詳細的 changelog 管理指南。
+
+*Generated: 2026-03-14*

@@ -293,6 +293,13 @@ export function MindMapViewer({ data, onAskQuestion }: Props) {
 
     useEffect(() => { setMounted(true); }, []);
 
+    useEffect(() => {
+        if (!fullscreen) return;
+        const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setFullscreen(false); };
+        document.addEventListener("keydown", handler);
+        return () => document.removeEventListener("keydown", handler);
+    }, [fullscreen]);
+
     const onToggle = useCallback((path: string) => {
         setCollapsed((prev) => {
             const next = new Set(prev);

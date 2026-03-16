@@ -5,6 +5,7 @@ Generates 9 types of AI content from a project's documents:
   flashcards, quiz, infographic, datatable
 """
 import json
+import logging
 
 from llama_index.core.llms import ChatMessage, MessageRole
 
@@ -311,9 +312,10 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             content_json="{}",
             content_text=raw,
         )
-    except Exception as e:
+    except Exception:
+        logging.exception("Studio artifact generation failed: project=%s type=%s", project_id, artifact_type)
         update_studio_artifact(
             artifact_id,
             status="error",
-            error_message=f"{type(e).__name__}: {str(e)}",
+            error_message="生成失敗，請確認文件內容有效後稍後重試。",
         )

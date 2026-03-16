@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
     Mic2, Video, GitBranch, FileText, CreditCard,
     HelpCircle, BarChart2, Table, X, ChevronLeft,
@@ -164,35 +164,23 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
     }, [activeProject.id]);
 
     // Poll generating artifacts every 3 seconds
-    const startPolling = useCallback(() => {
-        if (pollingRef.current) return;
-        pollingRef.current = setInterval(async () => {
-            const generating = Object.values(artifacts).filter((a) => a?.status === "generating");
-            if (generating.length === 0) {
-                clearInterval(pollingRef.current!);
-                pollingRef.current = null;
-                return;
-            }
-            for (const a of generating) {
-                try {
-                    const updated = await fetchStudioArtifact(activeProject.id, a.artifact_type as ArtifactType);
-                    setArtifacts((prev) => ({ ...prev, [updated.artifact_type]: updated }));
-                } catch {
-                    // ignore transient errors
-                }
-            }
-        }, 3000);
-    }, [artifacts, activeProject.id]);
-
     useEffect(() => {
         const hasGenerating = Object.values(artifacts).some((a) => a?.status === "generating");
-        if (hasGenerating) {
-            startPolling();
-        } else {
-            if (pollingRef.current) {
-                clearInterval(pollingRef.current);
-                pollingRef.current = null;
-            }
+        if (hasGenerating && !pollingRef.current) {
+            pollingRef.current = setInterval(async () => {
+                const generating = Object.values(artifacts).filter((a) => a?.status === "generating");
+                for (const a of generating) {
+                    try {
+                        const updated = await fetchStudioArtifact(activeProject.id, a!.artifact_type as ArtifactType);
+                        setArtifacts((prev) => ({ ...prev, [updated.artifact_type]: updated }));
+                    } catch {
+                        // ignore transient network errors
+                    }
+                }
+            }, 3000);
+        } else if (!hasGenerating && pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
         }
         return () => {
             if (pollingRef.current) {
@@ -200,7 +188,7 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
                 pollingRef.current = null;
             }
         };
-    }, [artifacts, startPolling]);
+    }, [artifacts, activeProject.id]);
 
     const handleCardClick = async (type: ArtifactType) => {
         const a = artifacts[type];

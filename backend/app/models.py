@@ -179,6 +179,17 @@ def delete_project(project_id: int) -> bool:
         ).all()
         for a in artifacts:
             session.delete(a)
+        # Delete conversations and their messages
+        conversations = session.exec(
+            select(Conversation).where(Conversation.project_id == project_id)
+        ).all()
+        for conv in conversations:
+            msgs = session.exec(
+                select(Message).where(Message.conversation_id == conv.id)
+            ).all()
+            for msg in msgs:
+                session.delete(msg)
+            session.delete(conv)
         session.delete(project)
         session.commit()
 

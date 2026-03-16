@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import {
     fetchProjects, fetchSettings, fetchDocuments, fetchConversations,
     fetchConversationMessages, createConversation, deleteConversationApi,
-    updateSettings, fetchModels,
+    updateSettings, fetchModels, uploadDocument, deleteDocument,
     AppSettings, ChatMessage, ConversationInfo, DocumentInfo, ModelInfo, ProjectInfo, SummaryInfo,
     streamChat,
 } from "@/lib/api";
@@ -60,7 +60,7 @@ export default function NotebookLMPage() {
     // ── Bootstrap ──────────────────────────────────────────
     useEffect(() => {
         if (!isAuthenticated()) return;
-        fetchProjects().then(setProjects).catch(() => {});
+        fetchProjects().then(setProjects).catch(() => setErrorMsg("載入專案失敗，請重新整理頁面"));
         fetchSettings().then((s) => { setSettings(s); setSettingsForm(s); }).catch(() => {});
     }, []);
 
@@ -77,7 +77,6 @@ export default function NotebookLMPage() {
     }, [activeProject]);
 
     // ── Upload ─────────────────────────────────────────────
-    const { uploadDocument } = require("@/lib/api");
     const handleUpload = useCallback(async (files: FileList | File[]) => {
         if (!activeProject) return;
         setIsUploading(true);
@@ -95,7 +94,6 @@ export default function NotebookLMPage() {
     }, [activeProject, pollDocumentStatus]);
 
     // ── Delete document ────────────────────────────────────
-    const { deleteDocument } = require("@/lib/api");
     const handleDeleteDocument = useCallback(async (collectionName: string) => {
         if (!activeProject) return;
         try {

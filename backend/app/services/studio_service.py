@@ -4,6 +4,7 @@ Generates 9 types of AI content from a project's documents:
   podcast, slides, video_script, mindmap, report,
   flashcards, quiz, infographic, datatable
 """
+import asyncio
 import json
 import logging
 
@@ -35,33 +36,103 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
 5. 輸出必須是合法的 JSON。
 """
 
-SLIDES_PROMPT = """你是一位專業的簡報設計師與演講教練。請根據以下文件內容，產生一份詳盡的簡報。
+SLIDES_PROMPT = """你是一位專業的簡報設計師。請根據以下文件內容，產生一份視覺多元的簡報 JSON。
 
-請嚴格按照以下 JSON 格式輸出（不要加入其他文字或 markdown 標記）：
+═══════════════════════════════════════
+【絕對禁止——違反以下任何一條即為錯誤】
+═══════════════════════════════════════
+1. conclusion 只能出現 1 次，必須是最後一張。禁止在中間章節放 conclusion。
+2. cover 只能出現 1 次，必須是第一張。
+3. 禁止重複結構：不可把簡報分成「兩個各自完整的弧線」——整份只有一個開頭和一個結尾。
+4. hero_text 最多 1 張。section 最多 3 張。quote 最多 1 張。
+5. content 版面不超過總頁數的 25%（例如 14 頁簡報最多 3 頁 content）。
+6. 每條 bullet 不超過 25 個中文字。title 不超過 15 個中文字。subtitle 不超過 20 個中文字。
+
+═══════════════════════════════════════
+【基本要求】
+═══════════════════════════════════════
+- 總頁數：12-16 張（含封面和結論）
+- 至少使用 6 種不同的 layout_type
+- 使用繁體中文（icon 名稱和 visual_keywords 用英文）
+- 輸出純 JSON，不加 markdown 標記
+
+═══════════════════════════════════════
+【敘事結構】先判斷文件類型：
+═══════════════════════════════════════
+- 匯報型：背景 → 行動/方法 → 成果數據 → 結論
+- 提案型：問題/機會 → 解決方案 → 執行計畫 → 行動呼籲
+- 教學型：概念 → 原理 → 步驟 → 應用
+- 分析型：背景 → 發現 → 洞察 → 建議
+
+═══════════════════════════════════════
+【12 種版面格式】（每張必須指定 layout_type）
+═══════════════════════════════════════
+
+cover    第一張封面
+  必填：title, subtitle
+  示例：{"layout_type":"cover","title":"AI治理實務","subtitle":"ISO 42001 導入報告","bullets":[],"visual_keywords":["governance"]}
+
+section  章節分隔（最多3張）
+  必填：title  可選：subtitle
+  示例：{"layout_type":"section","title":"導入背景與挑戰","bullets":[],"visual_keywords":["context"]}
+
+content  一般說明（最多佔25%）
+  必填：title, bullets（3-4條，每條≤25字）
+  示例：{"layout_type":"content","title":"核心架構說明","bullets":["第一條要點，精煉","第二條要點，精煉"],"visual_keywords":["structure"]}
+
+big_number  大數字指標（展示單一 KPI）
+  必填：metric, label  可選：unit, title, bullets（1條補充說明）
+  示例：{"layout_type":"big_number","title":"關鍵成效","metric":"87","unit":"%","label":"合規達成率","bullets":["相較去年提升 12%"],"visual_keywords":["kpi"]}
+
+dual_card  左右對比（比較/Before-After）
+  必填：title, left_card{title,bullets}, right_card{title,bullets}
+  示例：{"layout_type":"dual_card","title":"導入前後對比","left_card":{"title":"導入前","bullets":["人工審查","回應慢"]},"right_card":{"title":"導入後","bullets":["自動化","即時回應"]},"bullets":[],"visual_keywords":["comparison"]}
+
+multi_card  多格卡片（3-4個並列）
+  必填：title, cards（每張必填 icon + title + description）
+  icon 從以下選擇：FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights
+  示例：{"layout_type":"multi_card","title":"四大核心模組","cards":[{"icon":"FaShieldAlt","title":"風險管控","description":"識別並降低AI風險"},{"icon":"FaChartLine","title":"績效追蹤","description":"量化成效指標"}],"bullets":[],"visual_keywords":["modules"]}
+
+stats  數字統計卡（2-4個數字）
+  必填：title, bullets（格式：「數字：說明」，每條≤15字）
+  示例：{"layout_type":"stats","title":"成果數字","bullets":["98%：系統可用率","1,200：新增用戶","3.2x：效能提升"],"visual_keywords":["metrics"]}
+
+table  表格對比（規格/時程/數據）
+  必填：title, headers（陣列）, rows（2D陣列，每格≤10字）
+  示例：{"layout_type":"table","title":"方案比較","headers":["項目","方案A","方案B"],"rows":[["成本","低","高"],["功能","基本","完整"]],"bullets":[],"visual_keywords":["comparison"]}
+
+flow  流程圖（3-5個步驟）
+  必填：title, steps（每步：label≤8字，description≤15字）
+  示例：{"layout_type":"flow","title":"實施四步驟","steps":[{"label":"需求分析","description":"蒐集利害關係人意見"},{"label":"設計規劃","description":"制定治理框架"}],"bullets":[],"visual_keywords":["process"]}
+
+quote  引言（最多1張）
+  必填：title, bullets[0]（引言內容，≤40字）  可選：subtitle（來源）
+  示例：{"layout_type":"quote","title":"核心洞見","subtitle":"— ISO 42001:2023","bullets":["AI治理的本質是讓技術為人服務，而非反之"],"visual_keywords":["insight"]}
+
+hero_text  全版大字轉場（最多1張）
+  必填：title（≤12字）, subtitle（≤20字）
+  示例：{"layout_type":"hero_text","title":"我們的核心承諾","subtitle":"以人為本，數據為輔","bullets":[],"visual_keywords":["vision"]}
+
+conclusion  結論頁（全份只有1張，最後一頁）
+  必填：title, subtitle, bullets（3-4條要點，每條≤25字）
+  示例：{"layout_type":"conclusion","title":"結論與展望","subtitle":"感謝聆聽，歡迎交流","bullets":["要點一精煉","要點二精煉","要點三精煉"],"visual_keywords":["summary"]}
+
+═══════════════════════════════════════
+【JSON 輸出格式】
+═══════════════════════════════════════
 {
-  "title": "簡報主標題",
-  "slides": [
-    {
-      "title": "投影片標題",
-      "subtitle": "一句補充情境或副標題（封面與結論頁必填，其餘頁可選）",
-      "bullets": [
-        "完整說明句子：包含足夠背景讓觀眾無需額外解釋也能理解，約 20-40 字",
-        "完整說明句子：包含具體數據、例子或因果關係",
-        "完整說明句子：避免使用短詞或術語堆疊"
-      ],
-      "speaker_note": "演講者備忘稿：2-3 句詳細補充，包含數字、故事或過渡語，供演講者在台上延伸說明"
-    }
-  ]
+  "title": "簡報主標題（≤15字）",
+  "theme": "從以下選擇：tech-innovation / midnight-galaxy / ocean-depths / modern-minimalist / sunset-boulevard / forest-canopy / golden-hour / arctic-frost / desert-rose / botanical-garden",
+  "accent_color": "6碼hex不含#",
+  "slides": [12-16張投影片陣列]
 }
 
-規則：
-1. 使用繁體中文。
-2. 產生 8-12 張投影片（含封面和結論頁）。
-3. 每張投影片 3-5 個 bullet，每個 bullet 必須是完整句子（非短詞），含有實質資訊。
-4. 每張投影片必須有 speaker_note（演講者備忘稿）。
-5. 封面與結論頁必須有 subtitle。
-6. 內容結構清晰，從引言到結論。
-7. 輸出必須是合法的 JSON。
+theme 選擇依據：
+tech-innovation=科技AI軟體　midnight-galaxy=娛樂遊戲創意　ocean-depths=商業財務法律
+modern-minimalist=設計建築工業　sunset-boulevard=行銷生活旅遊　forest-canopy=環境健康永續
+golden-hour=文化歷史美食　arctic-frost=科學醫療研究　desert-rose=時尚精品美學　botanical-garden=教育生物科普
+
+所有版面的 bullets 欄位都必須存在（不用 bullets 的版面給空陣列 []）。
 """
 
 VIDEO_SCRIPT_PROMPT = """你是一位專業的影片旁白撰寫人。請根據以下文件內容，撰寫一段影片解說旁白腳本。
@@ -224,6 +295,7 @@ _TEXT_ONLY_TYPES = {"video_script", "report"}
 
 _MAX_PER_DOC_CHARS = 8000
 _MAX_TOTAL_CHARS = 20000
+_PROGRESS_UPDATE_EVERY = 500  # chars between DB progress updates
 
 
 def _strip_code_fence(raw: str) -> str:
@@ -266,7 +338,7 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
     """
     raw = ""
     try:
-        update_studio_artifact(artifact_id, status="generating")
+        update_studio_artifact(artifact_id, status="generating", progress_message="正在讀取文件內容…")
 
         # Collect text from all ready documents in the project
         docs = list_project_documents(project_id)
@@ -298,19 +370,41 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             ChatMessage(role=MessageRole.USER, content=user_msg),
         ]
 
-        response = await llm.achat(messages)
-        raw = response.message.content.strip()
+        update_studio_artifact(artifact_id, progress_message="AI 正在生成內容，請耐心等候…")
+
+        # Use streaming to avoid httpx.ReadTimeout on long JSON responses
+        # (non-streaming waits for the full response before the first byte arrives)
+        raw_parts: list[str] = []
+        total_chars = 0
+        last_progress_chars = 0
+        async for chunk in await llm.astream_chat(messages):
+            if chunk.delta:
+                raw_parts.append(chunk.delta)
+                total_chars += len(chunk.delta)
+                if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
+                    last_progress_chars = total_chars
+                    update_studio_artifact(
+                        artifact_id,
+                        progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
+                    )
+        raw = "".join(raw_parts).strip()
         raw = _strip_code_fence(raw)
 
         data = json.loads(raw)
         content_text = _format_text(artifact_type, data)
 
+        content_json_str = json.dumps(data, ensure_ascii=False)
         update_studio_artifact(
             artifact_id,
             status="done",
-            content_json=json.dumps(data, ensure_ascii=False),
+            content_json=content_json_str,
             content_text=content_text,
         )
+
+        # For slides, kick off thumbnail generation in a separate task
+        # so the artifact status flips to "done" immediately.
+        if artifact_type == "slides":
+            asyncio.create_task(_generate_thumbnails_bg(artifact_id, content_json_str))
 
     except json.JSONDecodeError:
         # LLM output wasn't valid JSON — store raw text so user can still read it
@@ -327,3 +421,12 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             status="error",
             error_message="生成失敗，請確認文件內容有效後稍後重試。",
         )
+
+
+async def _generate_thumbnails_bg(artifact_id: int, content_json: str) -> None:
+    """Run thumbnail generation in a thread (non-blocking background task)."""
+    from app.services.thumbnail_service import generate_thumbnails
+    try:
+        await asyncio.to_thread(generate_thumbnails, artifact_id, content_json)
+    except Exception:
+        logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)

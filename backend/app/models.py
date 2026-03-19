@@ -61,7 +61,7 @@ def init_db():
     _run_migrations()
 
 def _run_migrations():
-    """Add new columns to existing tables if they don't exist (SQLite)."""
+    """Add new columns to existing tables if they don't exist."""
     import sqlite3
     conn = sqlite3.connect(_DB_PATH)
     try:
@@ -82,11 +82,49 @@ def _run_migrations():
         if proj_cols and "user_id" not in proj_cols:
             cursor.execute("ALTER TABLE project ADD COLUMN user_id INTEGER DEFAULT 0")
 
+        # Migrate StudioArtifact – add progress_message
+        cursor.execute("PRAGMA table_info(studioartifact)")
+        sa_cols = {row[1] for row in cursor.fetchall()}
+        if sa_cols and "progress_message" not in sa_cols:
+            cursor.execute("ALTER TABLE studioartifact ADD COLUMN progress_message TEXT DEFAULT ''")
+
         conn.commit()
     except sqlite3.OperationalError as e:
         logging.warning("Migration warning: %s", e)
     finally:
         conn.close()
+
+
+# ── Persisted settings (survive restarts) ─────────────────────
+
+class PersistedSetting(SQLModel, table=True):
+    """Key-value store for settings that must survive backend restarts."""
+    key: str = Field(primary_key=True)
+    value: str = ""
+
+
+def get_persisted_setting(key: str) -> str | None:
+    with get_session() as session:
+        row = session.get(PersistedSetting, key)
+        return row.value if row else None
+
+
+def set_persisted_setting(key: str, value: str) -> None:
+    with get_session() as session:
+        row = session.get(PersistedSetting, key)
+        if row:
+            row.value = value
+            session.add(row)
+        else:
+            session.add(PersistedSetting(key=key, value=value))
+        session.commit()
+
+
+def load_persisted_settings() -> dict[str, str]:
+    """Return all persisted settings as a dict."""
+    with get_session() as session:
+        rows = list(session.exec(select(PersistedSetting)).all())
+        return {r.key: r.value for r in rows}
 
 
 def get_session() -> Session:
@@ -481,6 +519,7 @@ class StudioArtifact(SQLModel, table=True):
     content_json: str = "{}"    # structured JSON output
     content_text: str = ""      # plain-text output (for copy)
     error_message: str = ""
+    progress_message: str = ""  # human-readable progress during generation
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -510,6 +549,7 @@ def update_studio_artifact(
     content_json: str | None = None,
     content_text: str | None = None,
     error_message: str | None = None,
+    progress_message: str | None = None,
 ) -> StudioArtifact | None:
     with get_session() as session:
         artifact = session.get(StudioArtifact, artifact_id)
@@ -523,6 +563,8 @@ def update_studio_artifact(
             artifact.content_text = content_text
         if error_message is not None:
             artifact.error_message = error_message
+        if progress_message is not None:
+            artifact.progress_message = progress_message
         artifact.updated_at = datetime.now(timezone.utc).isoformat()
         session.add(artifact)
         session.commit()

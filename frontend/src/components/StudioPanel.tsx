@@ -79,8 +79,16 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
         switch (artifact.artifact_type) {
             case "podcast":
                 return <PodcastViewer data={data as PodcastContent} />;
-            case "slides":
-                return <SlidesViewer data={data as SlidesContent} />;
+            case "slides": {
+                // Defensively normalise: LLM sometimes wraps slides under a nested key
+                const slidesData: SlidesContent = Array.isArray(data?.slides)
+                    ? data
+                    : data?.content ?? data;
+                if (!Array.isArray(slidesData?.slides)) {
+                    return <pre className="text-xs whitespace-pre-wrap text-gray-600">{artifact.content_json}</pre>;
+                }
+                return <SlidesViewer data={slidesData} artifactId={artifact.id} />;
+            }
             case "mindmap":
                 return <MindMapViewer data={data as MindMapContent} onAskQuestion={onAskQuestion} />;
             case "flashcards":
@@ -266,6 +274,9 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
                         <div className="flex flex-col items-center gap-3 py-16 text-[var(--text-muted)]">
                             <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
                             <p className="text-sm">正在生成中，請稍候…</p>
+                            {selectedArtifact.progress_message && (
+                                <p className="text-xs text-blue-400">{selectedArtifact.progress_message}</p>
+                            )}
                         </div>
                     ) : selectedArtifact.status === "error" ? (
                         <div className="rounded-lg bg-red-500/10 border border-red-500/30 p-4 text-sm text-red-400">

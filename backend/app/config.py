@@ -1,10 +1,14 @@
 """
 Application configuration loaded from environment variables.
 """
+import logging
 import os
+import secrets
 import ssl
 from functools import lru_cache
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
@@ -22,6 +26,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "nvidia/nemotron-3-nano-30b-a3b-fp8"
     embedding_model: str = "nvidia/nv-embed-v2"
+    llm_max_tokens: int = 16384
 
     # ── Data paths ───────────────────────────────────────────
     upload_dir: str = os.getenv("UPLOAD_DIR", "/data/uploads")
@@ -46,7 +51,16 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    if not s.jwt_secret_key:
+        # No key configured – generate a random one for this session.
+        # WARNING: tokens become invalid on restart. Set JWT_SECRET_KEY in .env for persistence.
+        s.jwt_secret_key = secrets.token_hex(32)
+        log.warning(
+            "JWT_SECRET_KEY is not set. A random key has been generated for this session. "
+            "All users will be logged out on restart. Set JWT_SECRET_KEY in .env to avoid this."
+        )
+    return s
 
 
 def create_ssl_context() -> ssl.SSLContext:

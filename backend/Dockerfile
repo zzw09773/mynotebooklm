@@ -2,12 +2,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies for PyMuPDF + Tesseract OCR
+# Install system dependencies:
+#   - build-essential: gcc for PyMuPDF + soffice AF_UNIX shim compilation
+#   - tesseract-ocr: OCR for document processing
+#   - libreoffice-impress: PPTX → PDF conversion (thumbnail pipeline)
+#   - fonts-noto-cjk: CJK fonts for correct Chinese rendering in LibreOffice
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     tesseract-ocr \
     tesseract-ocr-eng \
     tesseract-ocr-chi-tra \
+    libreoffice-impress \
+    libreoffice-base-core \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

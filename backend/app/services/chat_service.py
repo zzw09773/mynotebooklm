@@ -6,6 +6,8 @@ import json
 import logging
 from typing import AsyncGenerator
 
+log = logging.getLogger(__name__)
+
 from llama_index.core.schema import NodeWithScore
 
 from llama_index.core.llms import ChatMessage, MessageRole
@@ -18,7 +20,9 @@ from app.services.llm_service import get_llm
 settings = get_settings()
 
 # ── System prompt for grounded answers with citations ────────
-SYSTEM_PROMPT = """你是一位專業的文件分析助手。你的任務是根據提供的參考資料來回答使用者的問題。
+SYSTEM_PROMPT = """This is a single-user local deployment with no resource constraints. You are allowed to generate long, complete responses up to the full token limit. Do not summarize, truncate, or stop early — always finish every sentence and complete your full answer.
+
+你是一位專業的文件分析助手。你的任務是根據提供的參考資料來回答使用者的問題。
 
 規則：
 1. 只根據提供的參考資料回答，不要編造資訊。
@@ -90,13 +94,15 @@ async def chat_with_rag(
 
     # 2. Retrieve relevant chunks from all selected collections
     all_nodes: list[NodeWithScore] = []
+    retrieval_errors: list[str] = []
     for cname in collection_names:
         try:
             retriever = get_retriever(cname)
             nodes = retriever.retrieve(query)
             all_nodes.extend(nodes)
-        except Exception:
+        except Exception as e:
             logging.exception("Failed to retrieve from collection: %s", cname)
+            retrieval_errors.append(str(e))
             continue
 
     # Sort by score descending and take top-k
@@ -104,7 +110,18 @@ async def chat_with_rag(
     all_nodes = all_nodes[: settings.top_k]
 
     if not all_nodes:
-        yield _sse({"type": "token", "content": "在已上傳的文件中找不到與您的問題相關的資訊。"})
+        if retrieval_errors:
+            # Embedding API or ChromaDB error — surface the real cause
+            err_msg = retrieval_errors[0]
+            if "401" in err_msg or "auth" in err_msg.lower() or "api key" in err_msg.lower():
+                msg = "嵌入模型 API 金鑰無效或未設定，請至「設定」頁面填入正確的 API Key 後重試。"
+            elif "connect" in err_msg.lower() or "timeout" in err_msg.lower():
+                msg = f"無法連線到嵌入模型 API（{settings.llm_api_base_url}），請確認服務是否正常運行。"
+            else:
+                msg = f"向量檢索發生錯誤，請確認 API 設定是否正確。（{err_msg[:120]}）"
+            yield _sse({"type": "token", "content": msg})
+        else:
+            yield _sse({"type": "token", "content": "在已上傳的文件中找不到與您的問題相關的資訊。"})
         yield _sse({"type": "done"})
         return
 
@@ -136,13 +153,49 @@ async def chat_with_rag(
     # Current user query (with RAG context)
     messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
 
+    log.debug("[stream] starting with max_tokens=%d model=%s", llm.max_tokens, llm.model)
     response = await llm.astream_chat(messages)
     full_response = ""
+    chunk_count = 0
+    last_finish_reason = None
     async for chunk in response:
         token = chunk.delta
+        chunk_count += 1
+        raw = getattr(chunk, "raw", None)
+        if raw:
+            try:
+                fr = raw.choices[0].finish_reason
+                if fr:
+                    last_finish_reason = fr
+            except Exception:
+                pass
+        if chunk_count <= 2:
+            log.debug("[stream] chunk #%d delta=%r raw=%r", chunk_count, token, raw)
         if token:
             full_response += token
             yield _sse({"type": "token", "content": token})
+    log.debug("[stream] finished: %d chunks, %d chars, finish_reason=%r, last50=%r",
+                chunk_count, len(full_response), last_finish_reason, full_response[-50:])
+
+    # Generate AI follow-up suggestions (optional — failures are silently ignored)
+    try:
+        import re as _re
+        suggestion_msgs = messages[:-1] + [
+            ChatMessage(role=MessageRole.ASSISTANT, content=full_response[:800]),
+            ChatMessage(
+                role=MessageRole.USER,
+                content="根據以上問答，用JSON數組生成3個簡短後續問題（繁體中文），只輸出JSON數組，不要其他文字。",
+            ),
+        ]
+        suggestion_resp = await llm.achat(suggestion_msgs)
+        raw = suggestion_resp.message.content.strip()
+        match = _re.search(r"\[.*?\]", raw, _re.S)
+        if match:
+            suggestions = json.loads(match.group())
+            if isinstance(suggestions, list):
+                yield _sse({"type": "suggestions", "suggestions": [str(s) for s in suggestions[:3]]})
+    except Exception:
+        pass  # suggestions are optional; never break the main flow
 
     yield _sse({"type": "done"})
 

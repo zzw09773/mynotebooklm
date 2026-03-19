@@ -14,7 +14,10 @@ settings = get_settings()
 
 # Global httpx client that skips SSL verification
 _http_client = httpx.Client(verify=False, timeout=httpx.Timeout(120.0))
-_async_http_client = httpx.AsyncClient(verify=False, timeout=httpx.Timeout(120.0))
+_async_http_client = httpx.AsyncClient(
+    verify=False,
+    timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
+)
 
 
 def get_llm() -> OpenAILike:
@@ -26,7 +29,7 @@ def get_llm() -> OpenAILike:
         temperature=settings.temperature,
         is_chat_model=True,
         is_function_calling_model=False,
-        max_tokens=4096,
+        max_tokens=settings.llm_max_tokens,
         http_client=_http_client,
         async_http_client=_async_http_client,
     )

@@ -61,7 +61,7 @@ def init_db():
     _run_migrations()
 
 def _run_migrations():
-    """Add new columns to existing tables if they don't exist (SQLite)."""
+    """Add new columns to existing tables if they don't exist."""
     import sqlite3
     conn = sqlite3.connect(_DB_PATH)
     try:
@@ -82,11 +82,49 @@ def _run_migrations():
         if proj_cols and "user_id" not in proj_cols:
             cursor.execute("ALTER TABLE project ADD COLUMN user_id INTEGER DEFAULT 0")
 
+        # Migrate StudioArtifact – add progress_message
+        cursor.execute("PRAGMA table_info(studioartifact)")
+        sa_cols = {row[1] for row in cursor.fetchall()}
+        if sa_cols and "progress_message" not in sa_cols:
+            cursor.execute("ALTER TABLE studioartifact ADD COLUMN progress_message TEXT DEFAULT ''")
+
         conn.commit()
     except sqlite3.OperationalError as e:
         logging.warning("Migration warning: %s", e)
     finally:
         conn.close()
+
+
+# ── Persisted settings (survive restarts) ─────────────────────
+
+class PersistedSetting(SQLModel, table=True):
+    """Key-value store for settings that must survive backend restarts."""
+    key: str = Field(primary_key=True)
+    value: str = ""
+
+
+def get_persisted_setting(key: str) -> str | None:
+    with get_session() as session:
+        row = session.get(PersistedSetting, key)
+        return row.value if row else None
+
+
+def set_persisted_setting(key: str, value: str) -> None:
+    with get_session() as session:
+        row = session.get(PersistedSetting, key)
+        if row:
+            row.value = value
+            session.add(row)
+        else:
+            session.add(PersistedSetting(key=key, value=value))
+        session.commit()
+
+
+def load_persisted_settings() -> dict[str, str]:
+    """Return all persisted settings as a dict."""
+    with get_session() as session:
+        rows = list(session.exec(select(PersistedSetting)).all())
+        return {r.key: r.value for r in rows}
 
 
 def get_session() -> Session:
@@ -173,6 +211,23 @@ def delete_project(project_id: int) -> bool:
         ).all()
         for s in summaries:
             session.delete(s)
+        # Delete studio artifacts
+        artifacts = session.exec(
+            select(StudioArtifact).where(StudioArtifact.project_id == project_id)
+        ).all()
+        for a in artifacts:
+            session.delete(a)
+        # Delete conversations and their messages
+        conversations = session.exec(
+            select(Conversation).where(Conversation.project_id == project_id)
+        ).all()
+        for conv in conversations:
+            msgs = session.exec(
+                select(Message).where(Message.conversation_id == conv.id)
+            ).all()
+            for msg in msgs:
+                session.delete(msg)
+            session.delete(conv)
         session.delete(project)
         session.commit()
 
@@ -444,4 +499,80 @@ def list_messages(conversation_id: int) -> list[Message]:
             .where(Message.conversation_id == conversation_id)
             .order_by(Message.created_at.asc())  # type: ignore
         )
+        return list(session.exec(stmt).all())
+
+
+# ── StudioArtifact model & helpers ────────────────────────────
+
+STUDIO_ARTIFACT_TYPES = frozenset({
+    "podcast", "slides", "video_script", "mindmap",
+    "report", "flashcards", "quiz", "infographic", "datatable",
+})
+
+
+class StudioArtifact(SQLModel, table=True):
+    """Stores an LLM-generated studio artifact for a project."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    artifact_type: str = Field(index=True)   # one of STUDIO_ARTIFACT_TYPES
+    status: str = "pending"     # pending | generating | done | error
+    content_json: str = "{}"    # structured JSON output
+    content_text: str = ""      # plain-text output (for copy)
+    error_message: str = ""
+    progress_message: str = ""  # human-readable progress during generation
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+def create_studio_artifact(project_id: int, artifact_type: str) -> StudioArtifact:
+    with get_session() as session:
+        artifact = StudioArtifact(project_id=project_id, artifact_type=artifact_type)
+        session.add(artifact)
+        session.commit()
+        session.refresh(artifact)
+        return artifact
+
+
+def get_studio_artifact(project_id: int, artifact_type: str) -> StudioArtifact | None:
+    with get_session() as session:
+        stmt = select(StudioArtifact).where(
+            StudioArtifact.project_id == project_id,
+            StudioArtifact.artifact_type == artifact_type,
+        )
+        return session.exec(stmt).first()
+
+
+def update_studio_artifact(
+    artifact_id: int,
+    *,
+    status: str | None = None,
+    content_json: str | None = None,
+    content_text: str | None = None,
+    error_message: str | None = None,
+    progress_message: str | None = None,
+) -> StudioArtifact | None:
+    with get_session() as session:
+        artifact = session.get(StudioArtifact, artifact_id)
+        if not artifact:
+            return None
+        if status is not None:
+            artifact.status = status
+        if content_json is not None:
+            artifact.content_json = content_json
+        if content_text is not None:
+            artifact.content_text = content_text
+        if error_message is not None:
+            artifact.error_message = error_message
+        if progress_message is not None:
+            artifact.progress_message = progress_message
+        artifact.updated_at = datetime.now(timezone.utc).isoformat()
+        session.add(artifact)
+        session.commit()
+        session.refresh(artifact)
+        return artifact
+
+
+def list_studio_artifacts(project_id: int) -> list[StudioArtifact]:
+    with get_session() as session:
+        stmt = select(StudioArtifact).where(StudioArtifact.project_id == project_id)
         return list(session.exec(stmt).all())

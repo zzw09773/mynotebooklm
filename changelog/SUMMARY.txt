@@ -1,0 +1,207 @@
+# 📊 NotebookLM 變更記錄摘要
+
+## 🎯 快速概覽
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│          NotebookLM 版本歷史和改動摘要                      │
+└─────────────────────────────────────────────────────────────┘
+
+v0.1.0 (2026-03-19) - PowerPoint & 縮圖生成 ⭐ 最新版本
+├─ 分支：v0.1.0
+├─ Commit：a9d0f81
+├─ 檔案數：487
+├─ 新增行：442,162
+├─ 刪除行：124
+└─ 主要內容：
+   ✓ 完整的 PPTX 生成引擎
+   ✓ 12 種投影片版面格式
+   ✓ 10 種設計主題
+   ✓ 縮圖生成服務
+   ✓ 10+ 完整示例
+   ✓ 70+ 字體資源
+
+v0.0.3 (2026-03-16) - 優化和重構
+├─ 分支：工作室功能v0.0.1
+├─ Commit：f9756a5
+├─ 檔案數：10
+├─ 新增行：3,540
+├─ 刪除行：37
+└─ 主要內容：
+   ✓ 輪詢邏輯性能優化
+   ✓ 增強的錯誤處理
+   ✓ 級聯刪除改進
+   ✓ 鍵盤快捷鍵支援
+
+v0.0.2 (2026-03-16) - Bug Fix & Refactor
+├─ 分支：工作室功能v0.0.1
+├─ Commit：6b71f45
+├─ 檔案數：10
+├─ 新增行：2,843
+├─ 刪除行：95
+└─ 主要內容：
+   ✓ Chat 函式性能優化
+   ✓ 心智圖完全重構
+   ✓ Studio 與 Chat 集成
+
+v0.0.1 (2026-03-14) - Studio 工作室功能
+├─ 分支：工作室功能v0.0.1
+├─ Commit：91ea558
+├─ 檔案數：17
+├─ 新增行：1,665
+├─ 刪除行：3
+└─ 主要內容：
+   ✓ StudioPanel 主組件
+   ✓ 9 種 Artifact 查看器
+   ✓ Studio API 後端服務
+
+v0.0.0 (2026-03-14) - 認證與安全性
+├─ 分支：main
+├─ Commit：534ef5b
+├─ 檔案數：30
+├─ 新增行：2,346
+├─ 刪除行：1,233
+└─ 主要內容：
+   ✓ 使用者認證系統
+   ✓ CORS 和 IDOR 修復
+   ✓ 檔案上傳限制
+```
+
+---
+
+## 📂 Changelog 資料夾結構
+
+```
+changelog/
+├── README.md
+├── CHANGELOG_v0.1.0_pptx-generation.md (1,049 行) ⭐ 新增
+├── pptx-and-thumbnail-v0.1.0.diff (87 MB) ⭐ 新增
+├── CHANGELOG_v0.0.3_optimization.md (589 行)
+├── optimization-and-refactor-v0.0.3.diff (137 KB)
+├── CHANGELOG_v0.0.2_bugfix-refactor.md (251 行)
+├── bugfix-and-refactor-v0.0.2.diff (113 KB)
+├── CHANGELOG_v0.0.1_studio.md (251 行)
+├── studio-feature-v0.0.1.diff (70 KB)
+├── CHANGES_v0.0.0_auth-and-security.md (192 行)
+├── quick-access.sh
+└── 總計：10,232 行，~87.5 GB
+```
+
+---
+
+## 📊 改動統計一覽
+
+| 版本 | 功能 | 日期 | 檔案 | 新增行 | 刪除行 | 淨增加 |
+|------|------|------|------|--------|--------|--------|
+| **0.1.0** | PPTX & 縮圖 | 2026-03-19 | 487 | 442,162 | 124 | +442,038 |
+| 0.0.3 | 優化 | 2026-03-16 | 10 | 3,540 | 37 | +3,503 |
+| 0.0.2 | Bug 修正 | 2026-03-16 | 10 | 2,843 | 95 | +2,748 |
+| 0.0.1 | Studio | 2026-03-14 | 17 | 1,665 | 3 | +1,662 |
+| 0.0.0 | 認證 | 2026-03-14 | 30 | 2,346 | 1,233 | +1,113 |
+
+**累計：** 452,556 行新增，1,492 行刪除，淨增加 +451,064 行
+
+---
+
+## 🚀 快速開始
+
+### 查看最新版本 (v0.1.0)
+```bash
+cat changelog/CHANGELOG_v0.1.0_pptx-generation.md
+```
+
+### 查看 PPTX 功能詳細資訊
+```bash
+grep -A 50 "PowerPoint 演示文稿生成" changelog/CHANGELOG_v0.1.0_pptx-generation.md
+```
+
+### 查看版面格式
+```bash
+grep -A 15 "支援的投影片類型" changelog/CHANGELOG_v0.1.0_pptx-generation.md
+```
+
+### 查看完整 Diff (注意：87 MB)
+```bash
+less changelog/pptx-and-thumbnail-v0.1.0.diff
+diffstat changelog/pptx-and-thumbnail-v0.1.0.diff
+```
+
+---
+
+## 🎯 v0.1.0 重點功能
+
+### 12 種投影片版面
+
+| 版面 | 用途 | 特性 |
+|------|------|------|
+| cover | 封面 | 標題 + 副標題 |
+| section | 章節分隔 | 大標題分隔 |
+| content | 一般說明 | 標題 + bullet |
+| big_number | KPI 指標 | 展示數字 |
+| dual_card | 左右對比 | Before/After |
+| multi_card | 並列卡片 | 3-4 個卡片 |
+| stats | 統計數據 | 多個數字 |
+| table | 表格 | 對比數據 |
+| flow | 流程圖 | 步驟流程 |
+| quote | 引言 | 含來源 |
+| hero_text | 大字轉場 | 強調頁面 |
+| conclusion | 結論 | 總結要點 |
+
+### 10 種設計主題
+- tech-innovation - 科技 AI 軟體
+- midnight-galaxy - 娛樂遊戲創意
+- ocean-depths - 商業財務法律
+- modern-minimalist - 設計建築工業
+- sunset-boulevard - 行銷生活旅遊
+- forest-canopy - 環保健康永續
+- golden-hour - 文化歷史美食
+- arctic-frost - 科學醫療研究
+- desert-rose - 時尚精品美學
+- botanical-garden - 教育生物科普
+
+---
+
+## 📈 功能演變時間軸
+
+```
+2026-03-14 ─ 2026-03-16 ─ 2026-03-19
+│             │             │
+v0.0.0      v0.0.2~3     v0.1.0
+Auth        Bug Fix      PPTX
+│           Optimize     Thumbnails
+└──────────┴────────────┘
+   穩定期      改進期      重大升級期
+```
+
+---
+
+## 💡 使用案例
+
+### 業務報告
+文件 → Slides → PPTX 下載 → PowerPoint 編輯
+
+### 教學簡報  
+課程筆記 → Slides → PPTX → 列印/分享
+
+### 營銷材料
+營銷計畫 → 多種主題 PPTX → A/B 測試
+
+### 技術簡報
+技術規格 → Slides → PPTX → 技術演示
+
+---
+
+## 📞 相關資源
+
+| 資源 | 位置 |
+|------|------|
+| 最新 Changelog | `changelog/CHANGELOG_v0.1.0_pptx-generation.md` |
+| 完整 Diff | `changelog/pptx-and-thumbnail-v0.1.0.diff` |
+| 指南 | `changelog/README.md` |
+| 項目根目錄 | `/home/aia/c1147259/project/notebooklm/` |
+| 當前分支 | `v0.1.0` |
+| 主要分支 | `origin/main` |
+
+---
+
+*Last Updated: 2026-03-19*

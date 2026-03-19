@@ -2,10 +2,14 @@
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
-    Send, Loader2, Bot, User as UserIcon, AlertCircle, X, ChevronRight, Sparkles, Settings, MessageSquare,
+    Send, Loader2, Bot, User as UserIcon, AlertCircle, X, ChevronRight, Sparkles,
+    Settings, MessageSquare, Layers, Pencil, Trash2, Check,
 } from "lucide-react";
 import { ChatMessage, Citation, AppSettings } from "@/lib/api";
+
+const QUICK_QUESTIONS = ["這份文件的主要內容是什麼？", "請幫我總結重點", "有什麼關鍵發現？"];
 
 interface ChatAreaProps {
     messages: ChatMessage[];
@@ -15,20 +19,38 @@ interface ChatAreaProps {
     sidebarOpen: boolean;
     documents: { length: number };
     settings: AppSettings | null;
+    docFaqs?: { q: string; a: string }[];
     onSend: () => void;
     onInputChange: (v: string) => void;
     onErrorDismiss: () => void;
     onOpenSidebar: () => void;
     onOpenSettings: () => void;
+    onOpenStudio: () => void;
+    onEditMessage?: (index: number, newContent: string) => void;
+    onDeleteMessage?: (index: number) => void;
+    followUpSuggestions?: string[];
 }
 
 export function ChatArea({
-    messages, isStreaming, inputValue, errorMsg, sidebarOpen, documents, settings,
-    onSend, onInputChange, onErrorDismiss, onOpenSidebar, onOpenSettings,
+    messages, isStreaming, inputValue, errorMsg, sidebarOpen, documents, settings, docFaqs,
+    onSend, onInputChange, onErrorDismiss, onOpenSidebar, onOpenSettings, onOpenStudio,
+    onEditMessage, onDeleteMessage, followUpSuggestions,
 }: ChatAreaProps) {
     const chatEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
+    const [editingIndex, setEditingIndex] = useState<number | null>(null);
+    const [editDraft, setEditDraft] = useState("");
+
+    // Quick questions: use document FAQs if available, else fallback
+    const quickItems = (docFaqs && docFaqs.length > 0)
+        ? docFaqs.slice(0, 6).map((f) => f.q)
+        : QUICK_QUESTIONS;
+
+    // Follow-up suggestions: AI-generated after each exchange
+    const followUps = followUpSuggestions && followUpSuggestions.length > 0
+        ? followUpSuggestions
+        : [];
 
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -48,8 +70,6 @@ export function ChatArea({
             onSend();
         }
     }, [onSend]);
-
-    const QUICK_QUESTIONS = ["這份文件的主要內容是什麼？", "請幫我總結重點", "有什麼關鍵發現？"];
 
     return (
         <main className="flex-1 flex flex-col min-w-0 relative">
@@ -75,6 +95,14 @@ export function ChatArea({
                         )}
                     </span>
                 </div>
+                <button
+                    onClick={onOpenStudio}
+                    className="p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-primary-400 transition-colors"
+                    aria-label="開啟工作室"
+                    title="工作室"
+                >
+                    <Layers className="w-4 h-4" />
+                </button>
                 <button
                     onClick={onOpenSettings}
                     className="p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-primary-400 transition-colors"
@@ -108,7 +136,7 @@ export function ChatArea({
                             AI 會根據文件內容回答，並標註引用來源。
                         </p>
                         <div className="mt-6 flex flex-wrap justify-center gap-2">
-                            {QUICK_QUESTIONS.map((q) => (
+                            {quickItems.map((q) => (
                                 <button
                                     key={q}
                                     onClick={() => {
@@ -127,21 +155,41 @@ export function ChatArea({
                         {messages.map((msg, i) => (
                             <div
                                 key={msg.id ?? `msg-${i}`}
-                                className={`flex gap-3 animate-slide-up ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                                className={`flex gap-3 animate-slide-up group/msg ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                             >
                                 {msg.role === "assistant" && (
                                     <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500/30 to-primary-600/20 flex items-center justify-center shrink-0 mt-0.5">
                                         <Bot className="w-4 h-4 text-primary-300" />
                                     </div>
                                 )}
-                                <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                                    msg.role === "user"
-                                        ? "bg-primary-600 text-white"
-                                        : "bg-[var(--bg-card)] border border-[var(--border-default)]"
-                                }`}>
+                                <div className="relative max-w-[80%]">
+                                    {/* Edit/Delete buttons (user messages only) */}
+                                    {msg.role === "user" && editingIndex !== i && (
+                                        <div className="absolute -top-7 right-0 hidden group-hover/msg:flex items-center gap-1">
+                                            <button
+                                                onClick={() => { setEditingIndex(i); setEditDraft(msg.content); }}
+                                                className="p-1 rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-primary-300 transition-colors"
+                                                title="編輯"
+                                            >
+                                                <Pencil className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button
+                                                onClick={() => onDeleteMessage?.(i)}
+                                                className="p-1 rounded hover:bg-red-500/10 text-[var(--text-muted)] hover:text-red-400 transition-colors"
+                                                title="刪除"
+                                            >
+                                                <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                    )}
+                                    <div className={`rounded-2xl px-4 py-3 ${
+                                        msg.role === "user"
+                                            ? "bg-primary-600 text-white"
+                                            : "bg-[var(--bg-card)] border border-[var(--border-default)]"
+                                    }`}>
                                     {msg.role === "assistant" ? (
                                         <div className="markdown-content text-sm leading-relaxed text-[var(--text-primary)]">
-                                            <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                                             {isStreaming && i === messages.length - 1 && !msg.content && (
                                                 <div className="flex gap-1 py-2">
                                                     <span className="typing-dot w-2 h-2 bg-primary-400 rounded-full" />
@@ -149,6 +197,34 @@ export function ChatArea({
                                                     <span className="typing-dot w-2 h-2 bg-primary-400 rounded-full" />
                                                 </div>
                                             )}
+                                        </div>
+                                    ) : editingIndex === i ? (
+                                        <div className="flex flex-col gap-2 min-w-[200px]">
+                                            <textarea
+                                                value={editDraft}
+                                                onChange={(e) => setEditDraft(e.target.value)}
+                                                className="bg-primary-700 text-white text-sm rounded-lg px-2 py-1.5 resize-none outline-none border border-primary-400/50 min-h-[60px]"
+                                                autoFocus
+                                            />
+                                            <div className="flex gap-1.5 justify-end">
+                                                <button
+                                                    onClick={() => setEditingIndex(null)}
+                                                    className="px-2 py-1 text-xs rounded bg-primary-700 hover:bg-primary-600 transition-colors"
+                                                >
+                                                    取消
+                                                </button>
+                                                <button
+                                                    onClick={() => {
+                                                        if (editDraft.trim()) {
+                                                            onEditMessage?.(i, editDraft.trim());
+                                                            setEditingIndex(null);
+                                                        }
+                                                    }}
+                                                    className="px-2 py-1 text-xs rounded bg-white text-primary-700 hover:bg-primary-100 transition-colors flex items-center gap-1"
+                                                >
+                                                    <Check className="w-3 h-3" /> 送出
+                                                </button>
+                                            </div>
                                         </div>
                                     ) : (
                                         <p className="text-sm leading-relaxed">{msg.content}</p>
@@ -170,6 +246,7 @@ export function ChatArea({
                                             </div>
                                         </div>
                                     )}
+                                    </div>
                                 </div>
                                 {msg.role === "user" && (
                                     <div className="w-8 h-8 rounded-lg bg-dark-700 flex items-center justify-center shrink-0 mt-0.5">
@@ -178,6 +255,23 @@ export function ChatArea({
                                 )}
                             </div>
                         ))}
+                        {/* Follow-up suggestions */}
+                        {!isStreaming && followUps.length > 0 && (
+                            <div className="flex flex-col gap-1.5 pt-1">
+                                <p className="text-xs text-[var(--text-muted)]">可能感興趣的問題：</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {followUps.map((q) => (
+                                        <button
+                                            key={q}
+                                            onClick={() => onInputChange(q)}
+                                            className="px-3 py-1.5 text-xs rounded-full border border-[var(--border-light)] text-[var(--text-secondary)] hover:text-primary-300 hover:border-primary-500/40 hover:bg-primary-500/5 transition-all duration-200 text-left"
+                                        >
+                                            {q}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                         <div ref={chatEndRef} />
                     </div>
                 )}

@@ -6,41 +6,62 @@
 
 ```
 changelog/
-├── README.md ## 📊 版本對比
-
-| 版本 | 日期 | 主要功能 | 檔案變更 | 新增行數 |
-|------|------|---------|---------|---------|
-| **v0.1.0** | 2026-03-19 | PPTX & 縮圖 | 487 | 442,162 |
-| v0.0.3 | 2026-03-16 | 優化 & 重構 | 10 | 3,540 |
-| v0.0.2 | 2026-03-16 | Bug 修正 | 10 | 2,843 |
-| v0.0.1 | 2026-03-14 | Studio 工作室 | 17 | 1,665 |
-| v0.0.0 | 2026-03-14 | 認證 & 安全 | 30 | 2,346 |                       # 本檔案
-├── CHANGES_v0.0.0_auth-and-security.md  # 認證與安全性更新
-├── CHANGELOG_v0.0.1_studio.md            # Studio 工作室功能
-├── studio-feature-v0.0.1.diff            # Studio 功能的詳細 diff
+├── README.md                                    # 本檔案
+├── SUMMARY.txt                                  # 快速摘要
+├── CHANGELOG_v0.1.1_pptx-optimization.md       # v0.1.1 PPTX 優化
+├── pptx-optimization-v0.1.1.diff              # v0.1.1 Diff 檔
+├── CHANGELOG_v0.1.0_*.md                       # v0.1.0 UI 增強
+├── studio-feature-v0.1.0.diff                 # v0.1.0 Diff 檔
+├── CHANGELOG_v0.0.3_optimization.md           # v0.0.3 優化
+├── optimization-and-refactor-v0.0.3.diff     # v0.0.3 Diff 檔
+├── CHANGELOG_v0.0.2_bugfix-refactor.md        # v0.0.2 Bug 修正
+├── bugfix-and-refactor-v0.0.2.diff            # v0.0.2 Diff 檔
+├── CHANGELOG_v0.0.1_studio.md                 # v0.0.1 Studio
+├── studio-feature-v0.0.1.diff                 # v0.0.1 Diff 檔
+├── CHANGES_v0.0.0_auth-and-security.md        # v0.0.0 認證
+├── quick-access.sh                             # 快速查詢工具
 └── ...
 ```
 
 ## 📝 版本記錄
 
-### v0.1.0 - PowerPoint & 縮圖生成 ⭐ 最新版本 (重大升級)
+### v0.1.1 - PPTX 優化和架構改進 ⭐ 最新版本
+**日期：** 2026-03-20  
+**分支：** `v0.1.0`  
+**Commit：** `56ae671`
+
+**主要改動：**
+- 🔧 Node.js PPTX 運行時服務（沙盒隔離）
+- 📷 圖像質量分析服務（vision_qa）
+- 🎨 圖標提取腳本（extract_icons）
+- ⚙️ 架構重構和代碼精簡（-429 行）
+- 🔐 增強的安全性和隔離
+
+**統計：**
+- 13 個檔案修改
+- 672 行新增 / 1,101 行刪除
+- 淨變化：-429 行（代碼精簡）
+
+**檔案：**
+- 📄 詳細說明：`CHANGELOG_v0.1.1_pptx-optimization.md`
+- 🔀 完整 diff：`pptx-optimization-v0.1.1.diff`
+
+---
+
+### v0.1.0 - UI 增強和 PPTX 支持
 **日期：** 2026-03-19  
 **分支：** `v0.1.0`  
 **Commit：** `a9d0f81`
 
 **主要改動：**
-- 🎨 完整的 PowerPoint (PPTX) 生成引擎
-- 📸 縮圖生成服務（含緩存）
-- 🎯 12 種投影片版面格式
-- 🌈 10 種預設設計主題
-- 📊 增強的 Slides 查看器 (+613 行)
-- 📚 10+ 完整示例和資源
-- 🛠️ 完整的 Office 工具集
-- 📦 70+ 字體和 React Icons 庫
+- 🎨 完整的 UI 重構和增強
+- 📊 PPTX 生成和縮圖支持
+- ⚡ 工作流程優化
+- 📚 完整的 README 文檔
 
-**檔案：**
-- 📄 詳細說明：`CHANGELOG_v0.1.0_pptx-generation.md`
-- 🔀 完整 diff：`pptx-and-thumbnail-v0.1.0.diff` (87 MB)
+**統計：**
+- 87 個檔案修改
+- 15,000+ 行新增
 
 ---
 
@@ -50,10 +71,10 @@ changelog/
 **Commit：** `f9756a5`
 
 **主要改動：**
-- ⚡ 輪詢邏輯性能優化（預期減少 20-30% 重新渲染）
-- 🛡️ 增強的錯誤處理（完整的 logging 和使用者友善訊息）
-- 🗑️ 級聯刪除改進（數據完整性保障）
-- ⌨️ 鍵盤快捷鍵支援（Escape 鍵退出全螢幕）
+- ⚡ 輪詢邏輯性能優化（-20~30%）
+- 🛡️ 增強的錯誤處理
+- 🗑️ 級聯刪除改進
+- ⌨️ 鍵盤快捷鍵支援
 
 **檔案：**
 - 📄 詳細說明：`CHANGELOG_v0.0.3_optimization.md`
@@ -61,17 +82,16 @@ changelog/
 
 ---
 
-### v0.0.2 - Bug Fix & Refactor
+### v0.0.2 - Bug 修正 & 重構
 **日期：** 2026-03-16  
 **分支：** `工作室功能v0.0.1`  
 **Commit：** `6b71f45`
 
 **主要改動：**
-- 🔧 Chat 函式性能優化（依賴項重構）
-- 🎨 心智圖完全重構（圓形 → 樹形佈局）
-- 🔄 增加展開/收合和互動詢問功能
+- 🔧 Chat 函式性能優化
+- 🎨 心智圖完全重構（樹形佈局）
+- 🔄 Studio 與 Chat 集成
 - 📚 建立 Changelog 管理系統
-- 🖥️ 新增全螢幕預覽模式
 
 **檔案：**
 - 📄 詳細說明：`CHANGELOG_v0.0.2_bugfix-refactor.md`
@@ -86,7 +106,7 @@ changelog/
 
 **主要改動：**
 - ✨ 實現 Studio 面板和多種 artifact 查看器
-- 🎨 支援 9 種不同的學習物件類型（播客、投影片、影片腳本等）
+- 🎨 支援 9 種不同的學習物件類型
 - 🔄 實時狀態輪詢機制
 - 📊 完整的後端 API 和業務邏輯
 
@@ -117,20 +137,23 @@ changelog/
 ### Markdown 檔案 (.md)
 包含詳細的說明和改動內容，適合快速了解改動概要：
 ```bash
-cat CHANGELOG_v0.0.1_studio.md
+cat changelog/CHANGELOG_v0.1.1_pptx-optimization.md
 ```
 
 ### Diff 檔案 (.diff)
 包含完整的代碼差異，適合進行詳細的代碼審查：
 ```bash
 # 查看 diff 檔
-cat studio-feature-v0.0.1.diff
+less changelog/pptx-optimization-v0.1.1.diff
+
+# 查看統計摘要
+diffstat changelog/pptx-optimization-v0.1.1.diff
 
 # 應用 diff 到其他分支
-git apply studio-feature-v0.0.1.diff
+git apply changelog/pptx-optimization-v0.1.1.diff
 
-# 查看 diff 的統計
-diffstat studio-feature-v0.0.1.diff
+# 查看特定檔案的改動
+grep -A 20 "pptx_runner_service.py" changelog/pptx-optimization-v0.1.1.diff
 ```
 
 ---
@@ -139,114 +162,106 @@ diffstat studio-feature-v0.0.1.diff
 
 | 版本 | 日期 | 主要功能 | 檔案變更 | 新增行數 |
 |------|------|---------|---------|---------|
+| **v0.1.1** | 2026-03-20 | PPTX 優化 | 13 | 672 |
+| v0.1.0 | 2026-03-19 | UI 增強 | 87 | 15,000+ |
+| v0.0.3 | 2026-03-16 | 優化 & 重構 | 10 | 3,540 |
+| v0.0.2 | 2026-03-16 | Bug 修正 | 10 | 2,843 |
 | v0.0.1 | 2026-03-14 | Studio 工作室 | 17 | 1,665 |
-| v0.0.0 | 2026-03-14 | 認證與安全 | 30 | 2,346 |
+| v0.0.0 | 2026-03-14 | 認證 & 安全 | 30 | 2,346 |
 
 ---
 
-## 📋 新增 Changelog 的步驟
+## 🚀 使用場景
 
-當有新的功能更新時，請按以下步驟操作：
-
-### 1. 建立新的 Markdown 文檔
+### 場景 1：我想快速了解最新版本的改動
 ```bash
-touch changelog/CHANGELOG_v{version}_feature-name.md
+cat changelog/SUMMARY.txt
+# 或
+head -100 changelog/CHANGELOG_v0.1.1_pptx-optimization.md
 ```
 
-### 2. 生成 Diff 檔
+### 場景 2：我要進行代碼審查
 ```bash
-# 如果在分支上
-git diff main..current-branch > changelog/feature-v{version}.diff
+# 在編輯器中打開 diff
+code changelog/pptx-optimization-v0.1.1.diff
 
-# 或者對比特定 commit
-git diff commit1..commit2 > changelog/feature-v{version}.diff
+# 或使用 less 分頁檢視
+less changelog/pptx-optimization-v0.1.1.diff
+
+# 查看統計
+diffstat changelog/pptx-optimization-v0.1.1.diff
 ```
 
-### 3. 填寫 Changelog 模板
-
-使用以下模板填寫新的 Markdown 檔案：
-
-```markdown
-# NotebookLM [功能名稱] v[版本]
-
-**版本：** v[版本]  
-**日期：** [日期]  
-**分支：** `[分支名]`
-
----
-
-## 📋 概述
-
-[簡潔的功能描述]
-
-**改動統計：**
-- **X 個檔案** 被修改或新建
-- **X 行** 新增
-- **X 行** 刪除
-
----
-
-## ✨ 新功能
-
-### 功能 1
-[詳細說明]
-
----
-
-## 📁 改動檔案清單
-
-### 後端檔案
-- ...
-
-### 前端檔案
-- ...
-
----
-
-## 🧪 測試建議
-
-- [ ] 測試項目 1
-- [ ] 測試項目 2
-
----
-
-## 📝 相關連結
-
-- **Diff 檔案：** `changelog/feature-v[版本].diff`
-- **分支：** `[分支名]`
-- **Commit：** `[commit-hash]`
+### 場景 3：我要應用某個版本的改動
+```bash
+git apply changelog/pptx-optimization-v0.1.1.diff
 ```
 
-### 4. 更新此 README
+### 場景 4：我要追蹤特定功能的發展
+```bash
+# 查找 PPTX 相關的所有版本
+grep -l "PPTX\|pptx" changelog/CHANGELOG_*.md
 
-在本文檔中新增版本記錄。
-
----
-
-## 🎯 最佳實踐
-
-1. **命名約定**
-   - Changelog：`CHANGELOG_v[version]_[feature-name].md`
-   - Diff 檔：`[feature-name]-v[version].diff`
-
-2. **內容組織**
-   - 使用清晰的標題層次
-   - 包含統計數據
-   - 列出所有變更的檔案
-   - 提供測試建議
-
-3. **定期維護**
-   - 每個版本發佈時建立新的 changelog
-   - 保留完整的歷史記錄
-   - 保持 README 的更新
+# 查看心智圖在各版本的改動
+grep -A 5 -B 2 "MindMap\|心智圖" changelog/CHANGELOG_*.md
+```
 
 ---
 
-## 📞 相關資源
+## 📈 性能改進統計
 
-- 項目根目錄：`/home/aia/c1147259/project/notebooklm/`
-- 現有 CHANGES.md：已移至 `CHANGES_v0.0.0_auth-and-security.md`
+### v0.1.1
+- Node.js 沙盒運行時
+- 圖像質量分析
+- 代碼精簡 (-429 行)
+
+### v0.1.0
+- 完整 UI 重構
+- PPTX 生成支持
+
+### v0.0.3
+- React 重新渲染：-20~30%
+- 輪詢效率：+40~50%
 
 ---
 
-*Last Updated: 2026-03-14*
+## 💡 最佳實踐
+
+✅ **務必做：**
+- 每個版本發佈時建立新的 changelog
+- 保留完整的 diff 檔以供審查
+- 使用清晰的版本命名 (v[major].[minor].[patch])
+- 在 markdown 中包含統計數據
+
+❌ **不應該做：**
+- 刪除舊的 changelog 記錄
+- 修改已發佈版本的 changelog
+- 只保留 diff 不保留 markdown 說明
+- 使用不一致的命名約定
+
+---
+
+## 🎯 相關資源
+
+| 資源 | 位置 |
+|------|------|
+| 快速摘要 | `SUMMARY.txt` |
+| 快速查詢 | `quick-access.sh` |
+| 項目根目錄 | `../` |
+| 主要分支 | `origin/main` |
+| 開發分支 | `origin/v0.1.0` |
+
+---
+
+## 📅 更新歷史
+
+- **2026-03-20** - 新增 v0.1.1 (PPTX 優化)
+- **2026-03-19** - 新增 v0.1.0 (UI 增強)
+- **2026-03-16** - 新增 v0.0.3 (優化)
+- **2026-03-14** - 初始建立 changelog 資料夾
+
+---
+
+**提示：** 使用 `./quick-access.sh` 獲取快速查詢指令。
+
+*Last Updated: 2026-03-20*

@@ -62,7 +62,19 @@ if (!codeFile || !outputPath) {
     process.exit(1);
 }
 
-const code = fs.readFileSync(codeFile, "utf8");
+let code = fs.readFileSync(codeFile, "utf8");
+
+// Fix common LLM mistakes before execution
+code = code.replace(/pres\.ShapeType\.circle\b/g, "pres.ShapeType.ellipse");
+// Replace let/const with var to allow variable re-declaration across slides
+// (LLMs often reuse variable names like startX/cols/rows in different slide blocks)
+code = code.replace(/\bconst\b/g, "var");
+code = code.replace(/\blet\b/g, "var");
+// Note: automatic quote-mismatch repair is NOT done here — a simple regex
+// cannot distinguish between a genuine mismatch and valid code like '"' (a
+// string whose content is a double-quote character).  Mismatched quotes in
+// LLM output must be caught by re-generation or prompt improvement.
+
 const pres = new PptxGenJS();
 
 // Sandbox: only expose pres, PptxGenJS class, and addIcon helper.
@@ -77,6 +89,21 @@ const sandbox = vm.createContext({
         error: (...args) => process.stderr.write("[slide:err] " + args.join(" ") + "\n"),
     },
 });
+
+// Syntax pre-check: compile only, no execution.
+// exit(2) = syntax error (retryable by asking LLM to fix).
+// exit(1) = runtime error (non-retryable or different fix needed).
+try {
+    new vm.Script(code);
+} catch (err) {
+    if (err instanceof SyntaxError) {
+        console.error(`[pptx_runner] SyntaxError: ${err.message}`);
+        process.exit(2);
+    }
+    // Non-SyntaxError during compilation — treat as runtime error
+    console.error(`[pptx_runner] Compile error: ${err.message}`);
+    process.exit(1);
+}
 
 try {
     vm.runInContext(code, sandbox, {

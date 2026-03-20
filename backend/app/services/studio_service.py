@@ -133,6 +133,13 @@ PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
 - 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
 - 不連續兩頁同版面。一頁最多4卡片/5步驟。數字用big_number不用bullet
 
+═══ 程式碼規則（違反會造成執行錯誤）═══
+- 所有字串用雙引號（"），禁用單引號（'）
+- 每個變數名只宣告一次，不同投影片請用不同名稱（如 items1/items2，cx1/cx2）
+- 程式碼結尾只到最後一個 JS 語句（};），不加 ---、//、說明文字
+- 禁止使用 ShapeType.circle（請用 ShapeType.ellipse）
+- 禁止使用 let/const（已由 runner 轉換，但直接用 var 更安全）
+
 ═══ 輸出 ═══
 只輸出JS。從pres.defineLayout(...)開始。不加```或說明。不呼叫writeFile()。
 12-16頁。首頁cover末頁conclusion。≥5種版面。≥5頁用addIcon。
@@ -395,12 +402,13 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 
         if artifact_type == "slides":
             # LLM returns PptxGenJS JavaScript code (not JSON).
-            # Store the code in content_text and execute it via Node.js runner.
+            # Save code but keep status="generating" so the frontend keeps polling.
+            # _generate_slides_pptx_bg will set status="done" after thumbnails are ready.
             update_studio_artifact(
                 artifact_id,
-                status="done",
                 content_json="{}",
                 content_text=raw,
+                progress_message="AI 產碼完成，正在建立簡報…",
             )
             asyncio.create_task(_generate_slides_pptx_bg(artifact_id, raw))
             return
@@ -436,23 +444,64 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 _THUMB_ROOT = Path("/data/thumbnails")
 
 
+async def _fix_pptxgenjs_syntax(code: str, error_msg: str) -> str:
+    """
+    Ask the LLM to fix a syntax error in PptxGenJS code.
+    Returns the corrected code, or the original code if the fix attempt fails.
+    """
+    llm = get_llm()
+    fix_prompt = (
+        "以下 PptxGenJS 程式碼有語法錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
+        "不加任何說明或 markdown 標記。\n\n"
+        f"錯誤訊息：{error_msg}\n\n"
+        f"程式碼：\n{code}"
+    )
+    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
+    try:
+        parts: list[str] = []
+        async for chunk in await llm.astream_chat(messages):
+            if chunk.delta:
+                parts.append(chunk.delta)
+        fixed = "".join(parts).strip()
+        fixed = _strip_code_fence(fixed)
+        return fixed if fixed else code
+    except Exception:
+        logging.exception("Syntax fix LLM call failed for artifact — using original code")
+        return code
+
+
 async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
     """
     Background task for slides:
       1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
+         On SyntaxError: ask LLM to fix and retry once.
       2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
       3. Convert .pptx → JPEG thumbnails (soffice → fitz)
     """
-    from app.services.pptx_runner_service import execute_pptxgenjs
+    from app.services.pptx_runner_service import execute_pptxgenjs, RunResult
     from app.services.thumbnail_service import generate_thumbnails
 
     with tempfile.TemporaryDirectory() as tmp:
         pptx_tmp = str(Path(tmp) / "slides.pptx")
         update_studio_artifact(artifact_id, progress_message="正在執行 PptxGenJS 生成簡報…")
 
-        success = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
-        if not success:
-            logging.error("PptxGenJS execution failed for artifact %d", artifact_id)
+        result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+
+        # On syntax error: ask LLM to fix then retry once
+        if result == RunResult.SYNTAX_ERROR:
+            logging.warning("PptxGenJS syntax error for artifact %d — asking LLM to fix", artifact_id)
+            update_studio_artifact(artifact_id, progress_message="偵測到語法錯誤，正在要求 AI 修正…")
+            pptxgenjs_code = await _fix_pptxgenjs_syntax(pptxgenjs_code, stderr)
+            update_studio_artifact(artifact_id, progress_message="重新執行修正後的程式碼…")
+            # Remove stale output file from first attempt before retry
+            Path(pptx_tmp).unlink(missing_ok=True)
+            result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+
+        if result != RunResult.SUCCESS:
+            logging.error(
+                "PptxGenJS execution failed for artifact %d (%s): %s",
+                artifact_id, result, stderr,
+            )
             update_studio_artifact(
                 artifact_id,
                 status="error",
@@ -472,6 +521,11 @@ async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> Non
             await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
         except Exception:
             logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="縮圖生成失敗，請稍後重試。",
+            )
             return
 
         # Optional: Vision QA — only runs when vision_model is configured
@@ -492,4 +546,6 @@ async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> Non
             problem_count = sum(len(s.get("issues", [])) for s in issues)
             if problem_count > 0:
                 logging.warning("Vision QA found %d issue(s) in artifact %d: %s", problem_count, artifact_id, issues)
-                update_studio_artifact(artifact_id, progress_message=f"視覺 QA 發現 {problem_count} 個問題（詳見日誌）")
+
+        # Thumbnails ready — mark artifact as done so frontend stops polling
+        update_studio_artifact(artifact_id, status="done", progress_message="")

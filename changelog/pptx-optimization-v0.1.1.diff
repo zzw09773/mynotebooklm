@@ -1,0 +1,2054 @@
+commit 56ae6711cbe2391e3b15a1e1b1c2118ca92e904a
+Author: AIA Assistant <aia@example.com>
+Date:   Fri Mar 20 02:55:42 2026 +0000
+
+    refactor: optimize PPTX generation and improve architecture
+    
+    - Refactor PPTX generation with Node.js runner for better stability
+    - Add pptx_runner_service for subprocess management
+    - Add vision_qa service for image analysis
+    - Add extract_icons.py script for icon extraction
+    - Improve thumbnail_service performance
+    - Optimize SlidesViewer component rendering
+    - Update Docker configuration
+    - Improve settings and configuration management
+    - Remove legacy pptx_generator.py
+    - Enhance security and error handling
+
+diff --git a/backend/Dockerfile b/backend/Dockerfile
+index a013488..6c6ce74 100644
+--- a/backend/Dockerfile
++++ b/backend/Dockerfile
+@@ -7,14 +7,19 @@ WORKDIR /app
+ #   - tesseract-ocr: OCR for document processing
+ #   - libreoffice-impress: PPTX → PDF conversion (thumbnail pipeline)
+ #   - fonts-noto-cjk: CJK fonts for correct Chinese rendering in LibreOffice
++#   - nodejs / pptxgenjs: server-side PptxGenJS execution for thumbnail generation
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     build-essential \
++    curl \
+     tesseract-ocr \
+     tesseract-ocr-eng \
+     tesseract-ocr-chi-tra \
+     libreoffice-impress \
+     libreoffice-base-core \
+     fonts-noto-cjk \
++    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
++    && apt-get install -y --no-install-recommends nodejs \
++    && npm install -g pptxgenjs@4.0.1 \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ COPY requirements.txt .
+diff --git a/backend/app/config.py b/backend/app/config.py
+index be1e569..a25feef 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -27,6 +27,7 @@ class Settings(BaseSettings):
+     llm_model: str = "nvidia/nemotron-3-nano-30b-a3b-fp8"
+     embedding_model: str = "nvidia/nv-embed-v2"
+     llm_max_tokens: int = 16384
++    vision_model: str = ""  # Optional: vision model for slide QA (empty = disabled)
+ 
+     # ── Data paths ───────────────────────────────────────────
+     upload_dir: str = os.getenv("UPLOAD_DIR", "/data/uploads")
+diff --git a/backend/app/routers/settings.py b/backend/app/routers/settings.py
+index 0f6ac8a..cee45e3 100644
+--- a/backend/app/routers/settings.py
++++ b/backend/app/routers/settings.py
+@@ -41,6 +41,8 @@ def _build_runtime_settings():
+         base.chunk_size = int(persisted["chunk_size"])
+     if persisted.get("llm_max_tokens"):
+         base.llm_max_tokens = int(persisted["llm_max_tokens"])
++    if persisted.get("vision_model") is not None:
++        base.vision_model = persisted["vision_model"]
+     return base
+ 
+ 
+@@ -65,6 +67,7 @@ class SettingsResponse(BaseModel):
+     top_k: int
+     chunk_size: int
+     llm_max_tokens: int
++    vision_model: str
+ 
+ 
+ class SettingsUpdate(BaseModel):
+@@ -76,6 +79,7 @@ class SettingsUpdate(BaseModel):
+     top_k: int | None = None
+     chunk_size: int | None = None
+     llm_max_tokens: int | None = None
++    vision_model: str | None = None
+ 
+ 
+ class ModelInfo(BaseModel):
+@@ -100,6 +104,7 @@ async def get_current_settings(current_user: User = Depends(get_current_user)):
+         top_k=_runtime_settings.top_k,
+         chunk_size=_runtime_settings.chunk_size,
+         llm_max_tokens=_runtime_settings.llm_max_tokens,
++        vision_model=_runtime_settings.vision_model,
+     )
+ 
+ 
+@@ -131,6 +136,9 @@ async def update_settings(update: SettingsUpdate, current_user: User = Depends(g
+     if update.llm_max_tokens is not None:
+         _runtime_settings.llm_max_tokens = update.llm_max_tokens
+         changed["llm_max_tokens"] = str(update.llm_max_tokens)
++    if update.vision_model is not None:
++        _runtime_settings.vision_model = update.vision_model
++        changed["vision_model"] = update.vision_model
+ 
+     # Persist to DB so settings survive restarts
+     for key, value in changed.items():
+diff --git a/backend/app/scripts/extract_icons.py b/backend/app/scripts/extract_icons.py
+new file mode 100644
+index 0000000..ee4b608
+--- /dev/null
++++ b/backend/app/scripts/extract_icons.py
+@@ -0,0 +1,140 @@
++"""
++extract_icons.py — Build-time script to extract SVG path data from react-icons source files.
++
++Usage:
++    python backend/app/scripts/extract_icons.py
++
++Reads from:
++    react-icons/fa/index.js  (FontAwesome 5)
++    react-icons/md/index.js  (Material Design)
++
++Outputs:
++    backend/app/data/icon_registry.json
++    frontend/src/lib/icon-registry.ts
++"""
++import json
++import re
++import sys
++from pathlib import Path
++
++# Paths relative to project root
++PROJECT_ROOT = Path(__file__).parents[3]  # notebooklm/
++REACT_ICONS_DIR = PROJECT_ROOT / "react-icons"
++OUTPUT_JSON = Path(__file__).parent.parent / "data" / "icon_registry.json"
++OUTPUT_TS = PROJECT_ROOT / "frontend" / "src" / "lib" / "icon-registry.ts"
++
++# Icons referenced in SLIDES_PROMPT
++TARGET_ICONS = {
++    "fa": [
++        "FaRocket", "FaShieldAlt", "FaChartLine", "FaUsers", "FaCog",
++        "FaLightbulb", "FaDatabase", "FaCloud", "FaCode", "FaGlobe",
++        "FaLock", "FaBolt", "FaStar", "FaCheck", "FaArrowUp",
++        "FaExchangeAlt", "FaBalanceScale", "FaHandshake", "FaTrophy",
++        "FaFlag", "FaHeart", "FaMoneyBillWave", "FaClipboardList",
++        "FaSearchDollar", "FaBullseye", "FaProjectDiagram", "FaSitemap",
++        "FaRegCalendarAlt", "FaUserTie", "FaBriefcase",
++    ],
++    "md": [
++        "MdDashboard", "MdAnalytics", "MdSecurity", "MdSpeed",
++        "MdBuild", "MdInsights", "MdTrendingUp", "MdCompareArrows",
++        "MdTimeline", "MdAssessment",
++    ],
++}
++
++
++def extract_paths_from_child(child_list: list) -> list[str]:
++    """Recursively collect all SVG path 'd' attributes from GenIcon child tree."""
++    paths = []
++    for item in child_list:
++        if not isinstance(item, dict):
++            continue
++        if item.get("tag") == "path":
++            d = item.get("attr", {}).get("d", "")
++            if d:
++                paths.append(d)
++        if item.get("child"):
++            paths.extend(extract_paths_from_child(item["child"]))
++    return paths
++
++
++def extract_icons_from_file(js_path: Path, icon_names: list[str]) -> dict[str, dict]:
++    """Extract SVG data for specified icon names from a react-icons index.js."""
++    source = js_path.read_text(encoding="utf-8")
++    result = {}
++
++    for icon_name in icon_names:
++        # Match: module.exports.FaRocket = function FaRocket (props) { return GenIcon({...})(props); };
++        pattern = (
++            rf"module\.exports\.{re.escape(icon_name)}\s*=\s*function\s+\w+\s*\(props\)\s*\{{\s*"
++            rf"return GenIcon\((\{{.*?\}})\)\(props\);\s*\}};"
++        )
++        match = re.search(pattern, source, re.DOTALL)
++        if not match:
++            print(f"  WARNING: {icon_name} not found in {js_path.name}", file=sys.stderr)
++            continue
++
++        try:
++            icon_data = json.loads(match.group(1))
++        except json.JSONDecodeError as e:
++            print(f"  ERROR: Failed to parse {icon_name}: {e}", file=sys.stderr)
++            continue
++
++        view_box = icon_data.get("attr", {}).get("viewBox", "0 0 24 24")
++        paths = extract_paths_from_child(icon_data.get("child", []))
++
++        if paths:
++            result[icon_name] = {"viewBox": view_box, "paths": paths}
++            print(f"  ✓ {icon_name} ({len(paths)} path(s))")
++        else:
++            print(f"  WARNING: {icon_name} has no paths", file=sys.stderr)
++
++    return result
++
++
++def main():
++    registry: dict[str, dict] = {}
++
++    for pack, icon_names in TARGET_ICONS.items():
++        js_file = REACT_ICONS_DIR / pack / "index.js"
++        if not js_file.exists():
++            print(f"ERROR: {js_file} not found", file=sys.stderr)
++            sys.exit(1)
++        print(f"\nExtracting from {js_file.relative_to(PROJECT_ROOT)}:")
++        icons = extract_icons_from_file(js_file, icon_names)
++        registry.update(icons)
++
++    # Write JSON registry for backend
++    OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
++    OUTPUT_JSON.write_text(json.dumps(registry, ensure_ascii=False, indent=2))
++    print(f"\n✓ Written {len(registry)} icons to {OUTPUT_JSON.relative_to(PROJECT_ROOT)}")
++
++    # Write TypeScript registry for frontend
++    ts_lines = [
++        "// AUTO-GENERATED by backend/app/scripts/extract_icons.py — do not edit manually",
++        "",
++        "export interface IconEntry {",
++        "    viewBox: string;",
++        "    paths: string[];",
++        "}",
++        "",
++        "export const ICON_REGISTRY: Record<string, IconEntry> = ",
++    ]
++    ts_lines.append(json.dumps(registry, ensure_ascii=False, indent=2) + ";")
++    ts_lines.append("")
++    OUTPUT_TS.parent.mkdir(parents=True, exist_ok=True)
++    OUTPUT_TS.write_text("\n".join(ts_lines))
++    print(f"✓ Written TypeScript registry to {OUTPUT_TS.relative_to(PROJECT_ROOT)}")
++
++    missing = [
++        name
++        for names in TARGET_ICONS.values()
++        for name in names
++        if name not in registry
++    ]
++    if missing:
++        print(f"\nWARNING: {len(missing)} icons not extracted: {missing}", file=sys.stderr)
++        sys.exit(1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/backend/app/scripts/pptx_runner.js b/backend/app/scripts/pptx_runner.js
+new file mode 100644
+index 0000000..981fcdf
+--- /dev/null
++++ b/backend/app/scripts/pptx_runner.js
+@@ -0,0 +1,99 @@
++/**
++ * pptx_runner.js — Execute LLM-generated PptxGenJS code in a vm sandbox.
++ *
++ * Usage:
++ *   node pptx_runner.js <code_file.js> <output.pptx>
++ *
++ * The code file should be a JavaScript snippet that uses `pres` (PptxGenJS instance)
++ * and optionally `addIcon(sld, iconName, colorHex, x, y, w, h)`.
++ * The snippet must NOT call pres.writeFile() — the runner handles that.
++ */
++
++"use strict";
++
++const vm = require("vm");
++const fs = require("fs");
++const path = require("path");
++
++const PptxGenJS = require("pptxgenjs");
++
++// Load icon registry (SVG path data extracted from react-icons source)
++const ICON_REGISTRY_PATH = path.join(__dirname, "../data/icon_registry.json");
++const ICONS = JSON.parse(fs.readFileSync(ICON_REGISTRY_PATH, "utf8"));
++
++/**
++ * Embed a react-icon as an SVG image into a slide.
++ * @param {object} sld - PptxGenJS slide object
++ * @param {string} iconName - Icon name, e.g. "FaRocket"
++ * @param {string} colorHex - Fill color with or without '#', e.g. "0066FF" or "#0066FF"
++ * @param {number} x - X position in inches
++ * @param {number} y - Y position in inches
++ * @param {number} w - Width in inches
++ * @param {number} h - Height in inches
++ */
++function addIcon(sld, iconName, colorHex, x, y, w, h) {
++    const entry = ICONS[iconName];
++    if (!entry) {
++        console.error(`[pptx_runner] Unknown icon: ${iconName}`);
++        return;
++    }
++    const color = colorHex.startsWith("#") ? colorHex : `#${colorHex}`;
++    const pathEls = entry.paths
++        .map((d) => `<path d="${d}" fill="${color}"/>`)
++        .join("");
++    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${entry.viewBox}">${pathEls}</svg>`;
++    const b64 = Buffer.from(svg).toString("base64");
++    sld.addImage({
++        data: `data:image/svg+xml;base64,${b64}`,
++        x,
++        y,
++        w,
++        h,
++    });
++}
++
++// ── Main ──────────────────────────────────────────────────────
++
++const codeFile = process.argv[2];
++const outputPath = process.argv[3];
++
++if (!codeFile || !outputPath) {
++    console.error("Usage: node pptx_runner.js <code_file.js> <output.pptx>");
++    process.exit(1);
++}
++
++const code = fs.readFileSync(codeFile, "utf8");
++const pres = new PptxGenJS();
++
++// Sandbox: only expose pres, PptxGenJS class, and addIcon helper.
++// vm.runInContext prevents access to require, process, fs, etc.
++const sandbox = vm.createContext({
++    pres,
++    PptxGenJS,
++    addIcon,
++    // Provide a safe console for debugging
++    console: {
++        log: (...args) => process.stderr.write("[slide] " + args.join(" ") + "\n"),
++        error: (...args) => process.stderr.write("[slide:err] " + args.join(" ") + "\n"),
++    },
++});
++
++try {
++    vm.runInContext(code, sandbox, {
++        timeout: 30000,         // 30s max execution time
++        displayErrors: true,
++    });
++} catch (err) {
++    console.error(`[pptx_runner] Code execution failed: ${err.message}`);
++    process.exit(1);
++}
++
++// Write the PPTX — pres.writeFile returns a Promise
++pres.writeFile({ fileName: outputPath })
++    .then(() => {
++        process.exit(0);
++    })
++    .catch((err) => {
++        console.error(`[pptx_runner] writeFile failed: ${err.message}`);
++        process.exit(1);
++    });
+diff --git a/backend/app/services/pptx_generator.py b/backend/app/services/pptx_generator.py
+deleted file mode 100644
+index afe2cdc..0000000
+--- a/backend/app/services/pptx_generator.py
++++ /dev/null
+@@ -1,398 +0,0 @@
+-"""
+-Server-side PPTX generation using python-pptx.
+-
+-Implements the same 10 themes and 12 layout types as the frontend PptxGenJS
+-output (SlidesViewer.tsx).  Used for the soffice → fitz thumbnail pipeline.
+-
+-Canvas: LAYOUT_16x9 — 10" × 5.625"
+-Colors: 6-char hex, no '#' prefix (consistent with PptxGenJS convention)
+-"""
+-import json
+-import logging
+-from pathlib import Path
+-
+-from pptx import Presentation
+-from pptx.dml.color import RGBColor
+-from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+-from pptx.util import Inches, Pt
+-
+-log = logging.getLogger(__name__)
+-
+-SLIDE_W = Inches(10)
+-SLIDE_H = Inches(5.625)
+-
+-# ── Theme palette (mirrors SLIDE_THEMES in SlidesViewer.tsx) ──
+-
+-THEMES: dict[str, dict[str, str]] = {
+-    "tech-innovation":   dict(bg="1E1E1E", accent="0066FF", title="FFFFFF", text="CCCCCC", muted="888888", card="2A2A2A"),
+-    "midnight-galaxy":   dict(bg="2B1E3E", accent="A490C2", title="E6E6FA", text="C8B8E0", muted="6B5B8A", card="3A2D50"),
+-    "ocean-depths":      dict(bg="1A2332", accent="2D8B8B", title="F1FAEE", text="A8DADC", muted="5A8A8A", card="243040"),
+-    "modern-minimalist": dict(bg="FFFFFF", accent="708090", title="36454F", text="36454F", muted="A0A0A0", card="F0F0F0"),
+-    "sunset-boulevard":  dict(bg="264653", accent="E76F51", title="E9C46A", text="F4A261", muted="A09060", card="314D5E"),
+-    "forest-canopy":     dict(bg="2D4A2B", accent="A4AC86", title="FAF9F6", text="C8CCB8", muted="7D8471", card="3A5C38"),
+-    "golden-hour":       dict(bg="4A403A", accent="F4A900", title="D4B896", text="D4B896", muted="C1666B", card="5A4E47"),
+-    "arctic-frost":      dict(bg="FAFAFA", accent="4A6FA5", title="1A2332", text="334155", muted="909090", card="D4E4F7"),
+-    "desert-rose":       dict(bg="E8D5C4", accent="B87D6D", title="5D2E46", text="5D2E46", muted="D4A5A5", card="F0E4D8"),
+-    "botanical-garden":  dict(bg="F5F3ED", accent="4A7C59", title="333333", text="555555", muted="B7472A", card="EBE9E1"),
+-}
+-
+-_HEX_RE = set("0123456789ABCDEFabcdef")
+-
+-
+-# ── Low-level helpers ──────────────────────────────────────────
+-
+-def _rgb(hex6: str) -> RGBColor:
+-    h = hex6.strip("#")
+-    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+-
+-
+-def _set_bg(slide, color_hex: str) -> None:
+-    fill = slide.background.fill
+-    fill.solid()
+-    fill.fore_color.rgb = _rgb(color_hex)
+-
+-
+-def _add_rect(slide, x_in: float, y_in: float, w_in: float, h_in: float, color_hex: str) -> None:
+-    """Add a solid filled rectangle (autoshape type 1 = rectangle)."""
+-    shape = slide.shapes.add_shape(
+-        1,  # MSO autoshape: rectangle
+-        Inches(x_in), Inches(y_in), Inches(w_in), Inches(h_in),
+-    )
+-    shape.fill.solid()
+-    shape.fill.fore_color.rgb = _rgb(color_hex)
+-    shape.line.color.rgb = _rgb(color_hex)  # same as fill → invisible border
+-
+-
+-def _add_text(
+-    slide,
+-    text: str,
+-    x_in: float,
+-    y_in: float,
+-    w_in: float,
+-    h_in: float,
+-    *,
+-    size_pt: int,
+-    color_hex: str,
+-    bold: bool = False,
+-    italic: bool = False,
+-    align: PP_ALIGN = PP_ALIGN.LEFT,
+-) -> None:
+-    txBox = slide.shapes.add_textbox(
+-        Inches(x_in), Inches(y_in), Inches(w_in), Inches(h_in),
+-    )
+-    tf = txBox.text_frame
+-    tf.word_wrap = True
+-    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+-    p = tf.paragraphs[0]
+-    p.alignment = align
+-    run = p.add_run()
+-    run.text = text
+-    run.font.size = Pt(size_pt)
+-    run.font.color.rgb = _rgb(color_hex)
+-    run.font.bold = bold
+-    run.font.italic = italic
+-
+-
+-def _add_bullets(
+-    slide,
+-    bullets: list[str],
+-    x_in: float,
+-    y_in: float,
+-    w_in: float,
+-    h_in: float,
+-    *,
+-    size_pt: int,
+-    color_hex: str,
+-) -> None:
+-    if not bullets:
+-        return
+-    txBox = slide.shapes.add_textbox(
+-        Inches(x_in), Inches(y_in), Inches(w_in), Inches(h_in),
+-    )
+-    tf = txBox.text_frame
+-    tf.word_wrap = True
+-    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+-    for idx, bullet in enumerate(bullets):
+-        p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
+-        p.text = f"•  {bullet}"
+-        p.font.size = Pt(size_pt)
+-        p.font.color.rgb = _rgb(color_hex)
+-        p.space_after = Pt(6)
+-
+-
+-# ── Layout builders ───────────────────────────────────────────
+-
+-def _build_cover(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0.35, 1.3, 0.07, 3.0, t["accent"])
+-    for size, px, py in [[0.38, 9.05, 4.45], [0.24, 9.28, 4.68], [0.12, 9.45, 4.85]]:
+-        _add_rect(slide, px, py, size, size, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.7, 1.6, 7.9, 1.4, size_pt=36, color_hex=t["title"], bold=True)
+-    if s.get("subtitle"):
+-        _add_text(slide, s["subtitle"], 0.7, 3.2, 7.9, 0.65, size_pt=18, color_hex=t["muted"])
+-
+-
+-def _build_content(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 0.09, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.5, 0.15, 9, 0.65, size_pt=22, color_hex=t["title"], bold=True)
+-    bullet_y = 1.08 if s.get("subtitle") else 0.92
+-    if s.get("subtitle"):
+-        _add_text(slide, s["subtitle"], 0.5, 0.85, 9, 0.35, size_pt=12, color_hex=t["muted"])
+-    _add_bullets(
+-        slide, s.get("bullets", []),
+-        0.5, bullet_y, 9, 5.625 - bullet_y - 0.45,
+-        size_pt=13, color_hex=t["text"],
+-    )
+-
+-
+-def _build_section(slide, s: dict, t: dict, index: int) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 2.55, t["accent"])
+-    _add_text(slide, f"SECTION {index + 1:02d}", 0.6, 0.45, 8.5, 0.45, size_pt=11, color_hex="FFFFFF")
+-    _add_text(slide, s.get("title", ""), 0.6, 1.0, 8.5, 1.3, size_pt=30, color_hex="FFFFFF", bold=True)
+-    if s.get("subtitle"):
+-        _add_text(slide, s["subtitle"], 0.6, 2.9, 8.5, 0.85, size_pt=16, color_hex=t["text"])
+-
+-
+-def _build_conclusion(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0.35, 1.0, 0.07, 1.5, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.7, 1.05, 8.5, 1.1, size_pt=30, color_hex=t["title"], bold=True)
+-    if s.get("subtitle"):
+-        _add_text(slide, s["subtitle"], 0.7, 2.25, 8.5, 0.55, size_pt=15, color_hex=t["muted"])
+-    # Key-point chips (simplified: just bullets)
+-    chips = s.get("bullets", [])[:4]
+-    if chips:
+-        chip_y = 3.15 if s.get("subtitle") else 2.9
+-        chip_w, chip_h = 4.2, 0.55
+-        for ci, chip_text in enumerate(chips):
+-            cx = 0.5 + (ci % 2) * (chip_w + 0.2)
+-            cy = chip_y + (ci // 2) * (chip_h + 0.15)
+-            _add_rect(slide, cx, cy, chip_w, chip_h, t["card"])
+-            _add_rect(slide, cx, cy, 0.05, chip_h, t["accent"])
+-            colon_idx = next((j for j, c in enumerate(chip_text) if c in "：:"), -1)
+-            label = chip_text[:colon_idx] if 0 < colon_idx <= 20 else chip_text[:25]
+-            _add_text(slide, label, cx + 0.15, cy + 0.08, chip_w - 0.25, chip_h - 0.1, size_pt=12, color_hex=t["text"])
+-
+-
+-def _build_quote(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_text(slide, "\u201C", 0.3, 0.1, 1.5, 1.5, size_pt=80, color_hex=t["accent"], bold=True)
+-    bullets = s.get("bullets", [])
+-    quote = bullets[0] if bullets else s.get("title", "")
+-    _add_text(slide, quote, 1.0, 1.1, 7.9, 2.6, size_pt=22, color_hex=t["title"], italic=True, align=PP_ALIGN.CENTER)
+-    if s.get("subtitle"):
+-        _add_text(slide, f"\u2014 {s['subtitle']}", 1.0, 4.3, 8.7, 0.5, size_pt=13, color_hex=t["muted"], align=PP_ALIGN.RIGHT)
+-
+-
+-def _build_stats(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 0.09, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.5, 0.15, 9, 0.65, size_pt=22, color_hex=t["title"], bold=True)
+-    cols = [0.35, 5.2]
+-    rows = [1.05, 3.1]
+-    for ci, bullet_text in enumerate(s.get("bullets", [])[:4]):
+-        cx, cy = cols[ci % 2], rows[ci // 2]
+-        _add_rect(slide, cx, cy, 4.5, 1.7, t["card"])
+-        _add_rect(slide, cx, cy, 4.5, 0.05, t["accent"])
+-        colon_idx = next((j for j, c in enumerate(bullet_text) if c in "：:"), -1)
+-        if 0 < colon_idx <= 8:
+-            big_text = bullet_text[:colon_idx]
+-            small_text = bullet_text[colon_idx + 1:].strip()
+-        else:
+-            big_text = bullet_text[:5]
+-            small_text = bullet_text[5:]
+-        _add_text(slide, big_text, cx + 0.2, cy + 0.12, 4.1, 0.65, size_pt=24, color_hex=t["accent"], bold=True)
+-        if small_text:
+-            _add_text(slide, small_text, cx + 0.2, cy + 0.82, 4.1, 0.75, size_pt=12, color_hex=t["text"])
+-
+-
+-# ── New layout builders ───────────────────────────────────────
+-
+-def _build_big_number(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 0.09, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.5, 0.2, 9, 0.6, size_pt=20, color_hex=t["title"], bold=True)
+-    metric = s.get("metric", "—")
+-    unit = s.get("unit", "")
+-    metric_str = f"{metric} {unit}".strip()
+-    _add_text(slide, metric_str, 1.5, 1.1, 7.0, 2.4, size_pt=72, color_hex=t["accent"], bold=True, align=PP_ALIGN.CENTER)
+-    _add_rect(slide, 3.5, 3.6, 3.0, 0.04, t["muted"])
+-    if s.get("label"):
+-        _add_text(slide, s["label"], 1.5, 3.75, 7.0, 0.65, size_pt=18, color_hex=t["text"], align=PP_ALIGN.CENTER)
+-    bullets = s.get("bullets", [])
+-    if bullets:
+-        _add_text(slide, bullets[0], 1.5, 4.55, 7.0, 0.65, size_pt=12, color_hex=t["muted"], align=PP_ALIGN.CENTER)
+-
+-
+-def _build_dual_card(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 0.09, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.5, 0.18, 9, 0.6, size_pt=20, color_hex=t["title"], bold=True)
+-    for ci, card_key in enumerate(["left_card", "right_card"]):
+-        card = s.get(card_key)
+-        if not card:
+-            continue
+-        cx = 0.3 if ci == 0 else 5.2
+-        _add_rect(slide, cx, 0.95, 4.5, 4.3, t["card"])
+-        _add_rect(slide, cx, 0.95, 4.5, 0.06, t["accent"])
+-        _add_text(slide, card.get("title", ""), cx + 0.2, 1.1, 4.1, 0.55, size_pt=15, color_hex=t["title"], bold=True)
+-        _add_bullets(slide, card.get("bullets", []), cx + 0.2, 1.75, 4.1, 3.3, size_pt=12, color_hex=t["text"])
+-
+-
+-def _build_multi_card(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 0.09, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.5, 0.18, 9, 0.6, size_pt=20, color_hex=t["title"], bold=True)
+-    cards = (s.get("cards") or [])[:6]
+-    cols = 3
+-    card_w = 2.8
+-    card_h = 1.95 if len(cards) > 3 else 3.5
+-    start_x = 0.25
+-    start_y = 0.95
+-    for ci, card in enumerate(cards):
+-        col = ci % cols
+-        row = ci // cols
+-        cx = start_x + col * (card_w + 0.25)
+-        cy = start_y + row * (card_h + 0.2)
+-        _add_rect(slide, cx, cy, card_w, card_h, t["card"])
+-        _add_rect(slide, cx, cy, card_w, 0.05, t["accent"])
+-        _add_text(slide, "◆", cx + 0.15, cy + 0.15, 0.5, 0.4, size_pt=14, color_hex=t["accent"])
+-        _add_text(slide, card.get("title", ""), cx + 0.15, cy + 0.55, card_w - 0.3, 0.5, size_pt=13, color_hex=t["title"], bold=True)
+-        if card.get("description"):
+-            _add_text(slide, card["description"], cx + 0.15, cy + 1.1, card_w - 0.3, card_h - 1.25, size_pt=11, color_hex=t["text"])
+-
+-
+-def _build_table(slide, s: dict, t: dict) -> None:
+-    from pptx.util import Pt as _Pt
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 0.09, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.5, 0.18, 9, 0.6, size_pt=20, color_hex=t["title"], bold=True)
+-    headers = s.get("headers") or []
+-    rows_data = (s.get("rows") or [])[:8]
+-    if not headers:
+-        return
+-    col_count = len(headers)
+-    row_count = 1 + len(rows_data)
+-    tbl = slide.shapes.add_table(row_count, col_count, Inches(0.4), Inches(1.0), Inches(9.2), Inches(4.3)).table
+-    col_w_emu = int(Inches(9.2) / col_count)
+-    for ci in range(col_count):
+-        tbl.columns[ci].width = col_w_emu
+-    # Header row
+-    for ci, hdr in enumerate(headers):
+-        cell = tbl.cell(0, ci)
+-        cell.text = hdr
+-        cell.fill.solid()
+-        cell.fill.fore_color.rgb = _rgb(t["accent"])
+-        para = cell.text_frame.paragraphs[0]
+-        para.font.bold = True
+-        para.font.size = _Pt(12)
+-        para.font.color.rgb = _rgb("FFFFFF")
+-        para.alignment = PP_ALIGN.CENTER
+-    # Data rows
+-    for ri, row_vals in enumerate(rows_data):
+-        bg = t["card"] if ri % 2 == 0 else t["bg"]
+-        for ci in range(col_count):
+-            cell = tbl.cell(ri + 1, ci)
+-            cell.text = (row_vals[ci] if ci < len(row_vals) else "")
+-            cell.fill.solid()
+-            cell.fill.fore_color.rgb = _rgb(bg)
+-            para = cell.text_frame.paragraphs[0]
+-            para.font.size = _Pt(11)
+-            para.font.color.rgb = _rgb(t["text"])
+-
+-
+-def _build_flow(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["bg"])
+-    _add_rect(slide, 0, 0, 10, 0.09, t["accent"])
+-    _add_text(slide, s.get("title", ""), 0.5, 0.18, 9, 0.6, size_pt=20, color_hex=t["title"], bold=True)
+-    steps = (s.get("steps") or [])[:5]
+-    if not steps:
+-        return
+-    step_w = 9.0 / len(steps)
+-    circle_r = 0.38
+-    circle_y = 1.6
+-    for si, step in enumerate(steps):
+-        cx = 0.5 + si * step_w + step_w / 2 - circle_r
+-        # Circle (oval autoshape = 9)
+-        oval = slide.shapes.add_shape(9, Inches(cx), Inches(circle_y), Inches(circle_r * 2), Inches(circle_r * 2))
+-        oval.fill.solid()
+-        oval.fill.fore_color.rgb = _rgb(t["accent"])
+-        oval.line.color.rgb = _rgb(t["accent"])
+-        _add_text(slide, str(si + 1), cx, circle_y, circle_r * 2, circle_r * 2, size_pt=14, color_hex="FFFFFF", bold=True, align=PP_ALIGN.CENTER)
+-        # Arrow connector (except last)
+-        if si < len(steps) - 1:
+-            arrow_x = cx + circle_r * 2 + 0.05
+-            arrow_w = step_w - circle_r * 2 - 0.1
+-            _add_rect(slide, arrow_x, circle_y + circle_r - 0.02, arrow_w, 0.04, t["muted"])
+-        # Label
+-        label_x = cx - 0.35
+-        label_w = circle_r * 2 + 0.7
+-        _add_text(slide, step.get("label", ""), label_x, circle_y + circle_r * 2 + 0.15, label_w, 0.5, size_pt=12, color_hex=t["title"], bold=True, align=PP_ALIGN.CENTER)
+-        if step.get("description"):
+-            _add_text(slide, step["description"], label_x, circle_y + circle_r * 2 + 0.75, label_w, 1.8, size_pt=10, color_hex=t["text"], align=PP_ALIGN.CENTER)
+-
+-
+-def _build_hero_text(slide, s: dict, t: dict) -> None:
+-    _set_bg(slide, t["accent"])
+-    # Corner decorations
+-    _add_rect(slide, 0, 0, 1.5, 0.08, "FFFFFF")
+-    _add_rect(slide, 0, 0, 0.08, 1.5, "FFFFFF")
+-    _add_rect(slide, 8.5, 5.545, 1.5, 0.08, "FFFFFF")
+-    _add_rect(slide, 9.92, 4.1, 0.08, 1.5, "FFFFFF")
+-    _add_text(slide, s.get("title", ""), 0.7, 1.3, 8.6, 1.8, size_pt=38, color_hex="FFFFFF", bold=True, align=PP_ALIGN.CENTER)
+-    if s.get("subtitle"):
+-        _add_text(slide, s["subtitle"], 0.7, 3.3, 8.6, 1.0, size_pt=18, color_hex="FFFFFF", align=PP_ALIGN.CENTER)
+-
+-
+-# ── Public entry point ────────────────────────────────────────
+-
+-def generate_pptx(content_json: str, output_path: Path) -> None:
+-    """Generate a themed PPTX file from slides JSON and write to output_path."""
+-    data = json.loads(content_json)
+-
+-    theme_name = data.get("theme", "tech-innovation")
+-    theme = dict(THEMES.get(theme_name, THEMES["tech-innovation"]))
+-
+-    accent_override = data.get("accent_color", "")
+-    if accent_override and len(accent_override) == 6 and all(c in _HEX_RE for c in accent_override):
+-        theme["accent"] = accent_override
+-
+-    prs = Presentation()
+-    prs.slide_width = SLIDE_W
+-    prs.slide_height = SLIDE_H
+-    blank_layout = prs.slide_layouts[6]  # blank layout — no placeholders
+-
+-    slides = data.get("slides", [])
+-    for i, s in enumerate(slides):
+-        sld = prs.slides.add_slide(blank_layout)
+-        layout = s.get("layout_type", "content")
+-
+-        if layout == "cover":
+-            _build_cover(sld, s, theme)
+-        elif layout == "stats":
+-            _build_stats(sld, s, theme)
+-        elif layout == "quote":
+-            _build_quote(sld, s, theme)
+-        elif layout == "section":
+-            _build_section(sld, s, theme, i)
+-        elif layout == "conclusion":
+-            _build_conclusion(sld, s, theme)
+-        elif layout == "big_number":
+-            _build_big_number(sld, s, theme)
+-        elif layout == "dual_card":
+-            _build_dual_card(sld, s, theme)
+-        elif layout == "multi_card":
+-            _build_multi_card(sld, s, theme)
+-        elif layout == "table":
+-            _build_table(sld, s, theme)
+-        elif layout == "flow":
+-            _build_flow(sld, s, theme)
+-        elif layout == "hero_text":
+-            _build_hero_text(sld, s, theme)
+-        else:
+-            _build_content(sld, s, theme)
+-
+-    prs.save(str(output_path))
+-    log.info("PPTX written: %s (%d slides)", output_path, len(slides))
+diff --git a/backend/app/services/pptx_runner_service.py b/backend/app/services/pptx_runner_service.py
+new file mode 100644
+index 0000000..8738c59
+--- /dev/null
++++ b/backend/app/services/pptx_runner_service.py
+@@ -0,0 +1,74 @@
++"""
++pptx_runner_service.py — Execute LLM-generated PptxGenJS code via a Node.js subprocess.
++
++The Node.js runner (app/scripts/pptx_runner.js) receives the code in a temp file,
++executes it inside a vm sandbox, and writes the resulting PPTX to disk.
++
++Security: asyncio.create_subprocess_exec is used (not shell=True), which prevents
++shell injection. The code_file path is passed as a positional argv argument.
++"""
++import asyncio
++import logging
++import tempfile
++from pathlib import Path
++
++log = logging.getLogger(__name__)
++
++_RUNNER_SCRIPT = Path(__file__).parent.parent / "scripts" / "pptx_runner.js"
++
++
++async def execute_pptxgenjs(code: str, output_path: str, timeout: int = 60) -> bool:
++    """
++    Execute LLM-generated PptxGenJS code to produce a .pptx file.
++
++    Args:
++        code:        JavaScript snippet using the `pres` variable.
++        output_path: Destination path for the generated PPTX.
++        timeout:     Max seconds to wait for Node.js subprocess.
++
++    Returns:
++        True if PPTX was produced successfully, False otherwise.
++    """
++    with tempfile.NamedTemporaryFile(suffix=".js", mode="w", delete=False, encoding="utf-8") as f:
++        f.write(code)
++        code_file = f.name
++
++    try:
++        # Use create_subprocess_exec (not shell=True) to avoid shell injection.
++        # Arguments are passed as a list, not interpolated into a shell string.
++        proc = await asyncio.create_subprocess_exec(
++            "node",
++            str(_RUNNER_SCRIPT),
++            code_file,
++            output_path,
++            stdout=asyncio.subprocess.PIPE,
++            stderr=asyncio.subprocess.PIPE,
++        )
++        try:
++            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
++        except asyncio.TimeoutError:
++            proc.kill()
++            log.error("PptxGenJS runner timed out after %ds", timeout)
++            return False
++
++        if proc.returncode != 0:
++            log.error(
++                "PptxGenJS runner failed (exit %d): %s",
++                proc.returncode,
++                stderr.decode(errors="replace"),
++            )
++            return False
++
++        if not Path(output_path).exists():
++            log.error("PptxGenJS runner returned 0 but output file missing: %s", output_path)
++            return False
++
++        log.info(
++            "PptxGenJS runner produced %s (%d bytes)",
++            output_path,
++            Path(output_path).stat().st_size,
++        )
++        return True
++
++    finally:
++        Path(code_file).unlink(missing_ok=True)
+diff --git a/backend/app/services/studio_service.py b/backend/app/services/studio_service.py
+index 1333ca0..6514a2c 100644
+--- a/backend/app/services/studio_service.py
++++ b/backend/app/services/studio_service.py
+@@ -7,6 +7,9 @@ Generates 9 types of AI content from a project's documents:
+ import asyncio
+ import json
+ import logging
++import shutil
++import tempfile
++from pathlib import Path
+ 
+ from llama_index.core.llms import ChatMessage, MessageRole
+ 
+@@ -36,103 +39,103 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
+ 5. 輸出必須是合法的 JSON。
+ """
+ 
+-SLIDES_PROMPT = """你是一位專業的簡報設計師。請根據以下文件內容，產生一份視覺多元的簡報 JSON。
+-
+-═══════════════════════════════════════
+-【絕對禁止——違反以下任何一條即為錯誤】
+-═══════════════════════════════════════
+-1. conclusion 只能出現 1 次，必須是最後一張。禁止在中間章節放 conclusion。
+-2. cover 只能出現 1 次，必須是第一張。
+-3. 禁止重複結構：不可把簡報分成「兩個各自完整的弧線」——整份只有一個開頭和一個結尾。
+-4. hero_text 最多 1 張。section 最多 3 張。quote 最多 1 張。
+-5. content 版面不超過總頁數的 25%（例如 14 頁簡報最多 3 頁 content）。
+-6. 每條 bullet 不超過 25 個中文字。title 不超過 15 個中文字。subtitle 不超過 20 個中文字。
+-
+-═══════════════════════════════════════
+-【基本要求】
+-═══════════════════════════════════════
+-- 總頁數：12-16 張（含封面和結論）
+-- 至少使用 6 種不同的 layout_type
+-- 使用繁體中文（icon 名稱和 visual_keywords 用英文）
+-- 輸出純 JSON，不加 markdown 標記
+-
+-═══════════════════════════════════════
+-【敘事結構】先判斷文件類型：
+-═══════════════════════════════════════
+-- 匯報型：背景 → 行動/方法 → 成果數據 → 結論
+-- 提案型：問題/機會 → 解決方案 → 執行計畫 → 行動呼籲
+-- 教學型：概念 → 原理 → 步驟 → 應用
+-- 分析型：背景 → 發現 → 洞察 → 建議
+-
+-═══════════════════════════════════════
+-【12 種版面格式】（每張必須指定 layout_type）
+-═══════════════════════════════════════
+-
+-cover    第一張封面
+-  必填：title, subtitle
+-  示例：{"layout_type":"cover","title":"AI治理實務","subtitle":"ISO 42001 導入報告","bullets":[],"visual_keywords":["governance"]}
+-
+-section  章節分隔（最多3張）
+-  必填：title  可選：subtitle
+-  示例：{"layout_type":"section","title":"導入背景與挑戰","bullets":[],"visual_keywords":["context"]}
+-
+-content  一般說明（最多佔25%）
+-  必填：title, bullets（3-4條，每條≤25字）
+-  示例：{"layout_type":"content","title":"核心架構說明","bullets":["第一條要點，精煉","第二條要點，精煉"],"visual_keywords":["structure"]}
+-
+-big_number  大數字指標（展示單一 KPI）
+-  必填：metric, label  可選：unit, title, bullets（1條補充說明）
+-  示例：{"layout_type":"big_number","title":"關鍵成效","metric":"87","unit":"%","label":"合規達成率","bullets":["相較去年提升 12%"],"visual_keywords":["kpi"]}
+-
+-dual_card  左右對比（比較/Before-After）
+-  必填：title, left_card{title,bullets}, right_card{title,bullets}
+-  示例：{"layout_type":"dual_card","title":"導入前後對比","left_card":{"title":"導入前","bullets":["人工審查","回應慢"]},"right_card":{"title":"導入後","bullets":["自動化","即時回應"]},"bullets":[],"visual_keywords":["comparison"]}
+-
+-multi_card  多格卡片（3-4個並列）
+-  必填：title, cards（每張必填 icon + title + description）
+-  icon 從以下選擇：FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights
+-  示例：{"layout_type":"multi_card","title":"四大核心模組","cards":[{"icon":"FaShieldAlt","title":"風險管控","description":"識別並降低AI風險"},{"icon":"FaChartLine","title":"績效追蹤","description":"量化成效指標"}],"bullets":[],"visual_keywords":["modules"]}
+-
+-stats  數字統計卡（2-4個數字）
+-  必填：title, bullets（格式：「數字：說明」，每條≤15字）
+-  示例：{"layout_type":"stats","title":"成果數字","bullets":["98%：系統可用率","1,200：新增用戶","3.2x：效能提升"],"visual_keywords":["metrics"]}
+-
+-table  表格對比（規格/時程/數據）
+-  必填：title, headers（陣列）, rows（2D陣列，每格≤10字）
+-  示例：{"layout_type":"table","title":"方案比較","headers":["項目","方案A","方案B"],"rows":[["成本","低","高"],["功能","基本","完整"]],"bullets":[],"visual_keywords":["comparison"]}
+-
+-flow  流程圖（3-5個步驟）
+-  必填：title, steps（每步：label≤8字，description≤15字）
+-  示例：{"layout_type":"flow","title":"實施四步驟","steps":[{"label":"需求分析","description":"蒐集利害關係人意見"},{"label":"設計規劃","description":"制定治理框架"}],"bullets":[],"visual_keywords":["process"]}
+-
+-quote  引言（最多1張）
+-  必填：title, bullets[0]（引言內容，≤40字）  可選：subtitle（來源）
+-  示例：{"layout_type":"quote","title":"核心洞見","subtitle":"— ISO 42001:2023","bullets":["AI治理的本質是讓技術為人服務，而非反之"],"visual_keywords":["insight"]}
+-
+-hero_text  全版大字轉場（最多1張）
+-  必填：title（≤12字）, subtitle（≤20字）
+-  示例：{"layout_type":"hero_text","title":"我們的核心承諾","subtitle":"以人為本，數據為輔","bullets":[],"visual_keywords":["vision"]}
+-
+-conclusion  結論頁（全份只有1張，最後一頁）
+-  必填：title, subtitle, bullets（3-4條要點，每條≤25字）
+-  示例：{"layout_type":"conclusion","title":"結論與展望","subtitle":"感謝聆聽，歡迎交流","bullets":["要點一精煉","要點二精煉","要點三精煉"],"visual_keywords":["summary"]}
+-
+-═══════════════════════════════════════
+-【JSON 輸出格式】
+-═══════════════════════════════════════
+-{
+-  "title": "簡報主標題（≤15字）",
+-  "theme": "從以下選擇：tech-innovation / midnight-galaxy / ocean-depths / modern-minimalist / sunset-boulevard / forest-canopy / golden-hour / arctic-frost / desert-rose / botanical-garden",
+-  "accent_color": "6碼hex不含#",
+-  "slides": [12-16張投影片陣列]
+-}
+-
+-theme 選擇依據：
+-tech-innovation=科技AI軟體　midnight-galaxy=娛樂遊戲創意　ocean-depths=商業財務法律
+-modern-minimalist=設計建築工業　sunset-boulevard=行銷生活旅遊　forest-canopy=環境健康永續
+-golden-hour=文化歷史美食　arctic-frost=科學醫療研究　desert-rose=時尚精品美學　botanical-garden=教育生物科普
+-
+-所有版面的 bullets 欄位都必須存在（不用 bullets 的版面給空陣列 []）。
++SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 PptxGenJS 程式碼。
++
++═══ 環境 ═══
++`pres`已建立。`addIcon(sld,name,colorHex,x,y,w,h)`可用。畫布10"×5.625"。
++禁用require/import/writeFile/fs/process/module/exports。
++Icon: FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp FaExchangeAlt FaBalanceScale FaHandshake FaTrophy FaFlag FaHeart FaMoneyBillWave FaClipboardList FaSearchDollar FaBullseye FaProjectDiagram FaSitemap FaRegCalendarAlt FaUserTie FaBriefcase MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights MdTrendingUp MdCompareArrows MdTimeline MdAssessment
++
++═══ 步驟一：敘事弧線 ═══
++匯報型:背景→發現→數據→啟示→結論 | 提案型:痛點→方案→可行性→佐證→行動
++分析型:定義→拆解→案例→利弊→建議 | 教學型:重要性→概念→步驟→案例→回顧
++敘事型:背景→經過→轉折→影響→結語
++根據弧線重新組織內容順序，不要逐段搬原文。
++
++═══ 步驟二：選版面（相鄰不重複，≥5種）═══
++1-3個數字→big_number | 比較兩者→dual_column | 3-4並列→card_grid
++有序步驟→process_flow | 結構化數據→table | 趨勢佔比→chart
++金句→quote_slide | 章節轉換→section_divider | 其餘→content_with_icon
++連續3頁密集內容後插入section_divider或quote_slide。
++
++═══ 步驟三：色票(bg/accent/title/text/muted/cardBg) ═══
++tech-innovation(科技AI):1E1E1E/0066FF/FFFFFF/CCCCCC/888888/2A2A2A
++ocean-depths(商業財務):1A2332/2D8B8B/F1FAEE/A8DADC/5A8A8A/243040
++sunset-boulevard(行銷旅遊):264653/E76F51/E9C46A/F4A261/A09060/314D5E
++forest-canopy(環境健康):2D4A2B/A4AC86/FAF9F6/C8CCB8/7D8471/3A5C38
++golden-hour(文化歷史):4A403A/F4A900/D4B896/D4B896/C1666B/5A4E47
++arctic-frost(科學醫療):FAFAFA/4A6FA5/1A2332/334155/909090/D4E4F7
++botanical-garden(教育科普):F5F3ED/4A7C59/333333/555555/B7472A/EBE9E1
++sports-arena(運動競技):1B1F3B/E63946/FFFFFF/D0D0D0/6C7A96/252A4A
++modern-minimalist(設計建築):FFFFFF/708090/36454F/36454F/A0A0A0/F0F0F0
++midnight-galaxy(娛樂創意):2B1E3E/A490C2/E6E6FA/C8B8E0/6B5B8A/3A2D50
++desert-rose(時尚精品):E8D5C4/B87D6D/5D2E46/5D2E46/D4A5A5/F0E4D8
++
++═══ 固定開頭 ═══
++pres.defineLayout({name:"16x9",width:10,height:5.625});
++pres.layout="16x9";
++const theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
++const FONT="Microsoft JhengHei";
++
++═══ 共用標題（cover/section_divider/quote_slide除外）═══
++sld.addShape(pres.ShapeType.rect,{x:0,y:0,w:10,h:0.06,fill:{color:theme.accent}});
++sld.addText("標題",{x:0.5,y:0.2,w:9,h:0.6,fontSize:24,color:theme.title,fontFace:FONT,bold:true,shrinkText:true});
++
++═══ 版面範例 ═══
++
++【cover】bg=theme.bg。頂部accent條h:0.06。左裝飾線x:0.5,y:1.5,w:0.07,h:2.4。主標題x:0.85,y:1.5,w:8.5,h:1.2,fontSize:40。副標x:0.85,y:2.85,fontSize:18,color:muted。右下色塊x:8.8,y:4.6,w:1,h:0.8。
++
++【section_divider】bg=accent。"SECTION 0N"x:0.6,y:1.2,fontSize:14,color:bg,charSpacing:4。標題x:0.6,y:1.8,fontSize:36,color:FFFFFF。描述x:0.6,y:3.3。
++
++【big_number — 多數字並排（關鍵範例）】
++const stats=[{num:"16",unit:"分鐘",label:"出場時間"},{num:"8.2",unit:"分",label:"場均得分"},{num:"+3",unit:"",label:"正負值"}];
++const cardW=2.7,gap=0.45,startX=(10-(stats.length*cardW+(stats.length-1)*gap))/2;
++stats.forEach((s,i)=>{
++  const cx=startX+i*(cardW+gap);
++  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.3,w:cardW,h:3.0,fill:{color:theme.cardBg},rectRadius:0.08});
++  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.3,w:cardW,h:0.06,fill:{color:theme.accent}});
++  sld.addText(s.num,{x:cx,y:1.6,w:cardW,h:1.4,fontSize:52,color:theme.accent,fontFace:FONT,bold:true,align:"center",valign:"middle",shrinkText:true});
++  if(s.unit)sld.addText(s.unit,{x:cx,y:2.9,w:cardW,h:0.4,fontSize:14,color:theme.muted,fontFace:FONT,align:"center",shrinkText:true});
++  sld.addText(s.label,{x:cx+0.2,y:3.5,w:cardW-0.4,h:0.5,fontSize:13,color:theme.text,fontFace:FONT,align:"center",shrinkText:true});
++});
++單一大數字：數字fontSize:100,x:0.5,y:1.4,w:9,h:2.2,align:center。說明y:3.6,fontSize:16,color:muted。
++
++【dual_column】左卡x:0.4,y:1.15,w:4.35,h:3.6,fill:cardBg。頂部accent條h:0.06。icon+標題fontSize:18+要點列表fontSize:13。中間"VS"x:4.35,y:2.6。右卡x:5.25,結構同左。
++
++【card_grid（關鍵範例）】
++const items=[{icon:"FaChartLine",t:"概念一",d:"說明"},{icon:"FaUsers",t:"概念二",d:"說明"},{icon:"FaLightbulb",t:"概念三",d:"說明"}];
++const n=items.length,cW=2.7,cG=0.45,cX=(10-(n*cW+(n-1)*cG))/2;
++items.forEach((it,i)=>{
++  const cx=cX+i*(cW+cG);
++  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.2,w:cW,h:3.4,fill:{color:theme.cardBg},rectRadius:0.08});
++  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.2,w:cW,h:0.06,fill:{color:theme.accent}});
++  addIcon(sld,it.icon,"#"+theme.accent,cx+0.2,1.55,0.45,0.45);
++  sld.addText(it.t,{x:cx+0.2,y:2.15,w:cW-0.4,h:0.45,fontSize:16,color:theme.title,fontFace:FONT,bold:true,shrinkText:true});
++  sld.addText(it.d,{x:cx+0.2,y:2.7,w:cW-0.4,h:1.6,fontSize:12,color:theme.text,fontFace:FONT,valign:"top",shrinkText:true});
++});
++
++【process_flow】圓形r=0.35水平排列。連接線y:1.85。sGap=(9.0-sN*0.7)/(sN-1)。每步：accent圓+白色編號fontSize:16 → 標題y:2.5,fontSize:14 → 說明y:2.95,fontSize:11。
++
++【content_with_icon】左icon x:0.5,y:1.4,w:0.9。垂直線x:1.7,w:0.04,h:3.2。右側addText陣列x:2.0,w:7.5交替粗體標題fontSize:16+說明fontSize:13。
++
++【quote_slide】bg=cardBg。"\u201C"fontSize:80,x:0.8,y:0.8。引文x:1.2,y:1.7,w:7.6,fontSize:24,italic,align:center。分隔線y:3.9。出處y:4.1,fontSize:14。
++
++【table】header:bold,color:FFFFFF,fill:accent,fontSize:13。交替行fill:cardBg/bg,fontSize:12。x:0.5,y:1.1,w:9。
++
++【chart】BAR:x:0.8,y:1.2,w:8.4,h:3.8,barDir:"col",chartColors:[theme.accent],valGridLine:{color:theme.cardBg,size:0.5},catGridLine:{style:"none"},showValue:true,showLegend:false。
++PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
++
++【conclusion】標題fontSize:28。accent線w:2。一句總結italic,color:accent。3條要點用卡片y=1.9+i*1.0,h:0.75,fill:cardBg + FaCheck icon + 文字。
++
++═══ 規則 ═══
++- (x+w)≤9.7, (y+h)≤5.5。N卡片：totalW=N*cardW+(N-1)*gap≤9.3, startX=(10-totalW)/2
++- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
++- 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
++- 不連續兩頁同版面。一頁最多4卡片/5步驟。數字用big_number不用bullet
++
++═══ 輸出 ═══
++只輸出JS。從pres.defineLayout(...)開始。不加```或說明。不呼叫writeFile()。
++12-16頁。首頁cover末頁conclusion。≥5種版面。≥5頁用addIcon。
+ """
+ 
+ VIDEO_SCRIPT_PROMPT = """你是一位專業的影片旁白撰寫人。請根據以下文件內容，撰寫一段影片解說旁白腳本。
+@@ -390,6 +393,18 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+         raw = "".join(raw_parts).strip()
+         raw = _strip_code_fence(raw)
+ 
++        if artifact_type == "slides":
++            # LLM returns PptxGenJS JavaScript code (not JSON).
++            # Store the code in content_text and execute it via Node.js runner.
++            update_studio_artifact(
++                artifact_id,
++                status="done",
++                content_json="{}",
++                content_text=raw,
++            )
++            asyncio.create_task(_generate_slides_pptx_bg(artifact_id, raw))
++            return
++
+         data = json.loads(raw)
+         content_text = _format_text(artifact_type, data)
+ 
+@@ -401,11 +416,6 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+             content_text=content_text,
+         )
+ 
+-        # For slides, kick off thumbnail generation in a separate task
+-        # so the artifact status flips to "done" immediately.
+-        if artifact_type == "slides":
+-            asyncio.create_task(_generate_thumbnails_bg(artifact_id, content_json_str))
+-
+     except json.JSONDecodeError:
+         # LLM output wasn't valid JSON — store raw text so user can still read it
+         update_studio_artifact(
+@@ -423,10 +433,63 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+         )
+ 
+ 
+-async def _generate_thumbnails_bg(artifact_id: int, content_json: str) -> None:
+-    """Run thumbnail generation in a thread (non-blocking background task)."""
++_THUMB_ROOT = Path("/data/thumbnails")
++
++
++async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
++    """
++    Background task for slides:
++      1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
++      2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
++      3. Convert .pptx → JPEG thumbnails (soffice → fitz)
++    """
++    from app.services.pptx_runner_service import execute_pptxgenjs
+     from app.services.thumbnail_service import generate_thumbnails
+-    try:
+-        await asyncio.to_thread(generate_thumbnails, artifact_id, content_json)
+-    except Exception:
+-        logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
++
++    with tempfile.TemporaryDirectory() as tmp:
++        pptx_tmp = str(Path(tmp) / "slides.pptx")
++        update_studio_artifact(artifact_id, progress_message="正在執行 PptxGenJS 生成簡報…")
++
++        success = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
++        if not success:
++            logging.error("PptxGenJS execution failed for artifact %d", artifact_id)
++            update_studio_artifact(
++                artifact_id,
++                status="error",
++                error_message="PptxGenJS 執行失敗，請稍後重試。",
++            )
++            return
++
++        # Persist PPTX alongside thumbnails so it can be served as a static file
++        # at /thumbnails/{artifact_id}/slides.pptx
++        persistent_dir = _THUMB_ROOT / str(artifact_id)
++        persistent_dir.mkdir(parents=True, exist_ok=True)
++        pptx_path = persistent_dir / "slides.pptx"
++        shutil.copy2(pptx_tmp, pptx_path)
++
++        update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
++        try:
++            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
++        except Exception:
++            logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
++            return
++
++        # Optional: Vision QA — only runs when vision_model is configured
++        from app.routers.settings import _runtime_settings
++        from app.services.vision_qa import visual_qa_check
++        from app.services.thumbnail_service import get_thumbnail_urls
++
++        if _runtime_settings.vision_model:
++            thumb_urls = get_thumbnail_urls(artifact_id)
++            thumb_paths = [_THUMB_ROOT / str(artifact_id) / Path(u).name for u in thumb_urls]
++            update_studio_artifact(artifact_id, progress_message="正在進行視覺品質檢查…")
++            issues = await visual_qa_check(
++                thumb_paths,
++                api_base_url=_runtime_settings.llm_api_base_url,
++                api_key=_runtime_settings.llm_api_key,
++                model=_runtime_settings.vision_model,
++            )
++            problem_count = sum(len(s.get("issues", [])) for s in issues)
++            if problem_count > 0:
++                logging.warning("Vision QA found %d issue(s) in artifact %d: %s", problem_count, artifact_id, issues)
++                update_studio_artifact(artifact_id, progress_message=f"視覺 QA 發現 {problem_count} 個問題（詳見日誌）")
+diff --git a/backend/app/services/thumbnail_service.py b/backend/app/services/thumbnail_service.py
+index 0e4a994..809bd54 100644
+--- a/backend/app/services/thumbnail_service.py
++++ b/backend/app/services/thumbnail_service.py
+@@ -1,12 +1,13 @@
+ """
+ Thumbnail generation pipeline for slides artifacts.
+ 
+-Pipeline: slides JSON → python-pptx → soffice (PPTX→PDF) → fitz (PDF→JPEG)
++Pipeline: PPTX → soffice (PPTX→PDF) → fitz (PDF→JPEG)
+ 
+ Thumbnails are stored at:  /data/thumbnails/{artifact_id}/slide_NNN.jpg
+ Served at:                 /thumbnails/{artifact_id}/slide_NNN.jpg  (StaticFiles)
+ """
+ import logging
++import shutil
+ import tempfile
+ from pathlib import Path
+ 
+@@ -14,7 +15,6 @@ import fitz  # PyMuPDF
+ import pikepdf
+ 
+ from app.scripts.soffice import run_soffice
+-from app.services.pptx_generator import generate_pptx
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -44,9 +44,14 @@ def thumbnails_exist(artifact_id: int) -> bool:
+ 
+ # ── Generation pipeline ───────────────────────────────────────
+ 
+-def generate_thumbnails(artifact_id: int, content_json: str) -> list[str]:
++def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
+     """
+-    Full blocking pipeline: JSON → PPTX → PDF → JPEG thumbnails.
++    Blocking pipeline: PPTX → PDF → JPEG thumbnails.
++
++    Args:
++        artifact_id: Studio artifact ID (used for output directory naming).
++        pptx_path:   Path to an already-generated .pptx file.
++
+     Returns list of thumbnail URL paths on success, empty list on failure.
+     """
+     out_dir = _thumb_dir(artifact_id)
+@@ -54,16 +59,14 @@ def generate_thumbnails(artifact_id: int, content_json: str) -> list[str]:
+ 
+     with tempfile.TemporaryDirectory() as tmp:
+         tmp_path = Path(tmp)
+-        pptx_path = tmp_path / "slides.pptx"
+ 
+-        # Step 1: Generate PPTX from slides JSON
+-        try:
+-            generate_pptx(content_json, pptx_path)
+-        except Exception:
+-            log.exception("PPTX generation failed for artifact %d", artifact_id)
+-            return []
++        # Copy the PPTX into the temp dir so soffice writes its PDF there
++        pptx_src = Path(pptx_path)
++        pptx_in_tmp = tmp_path / "slides.pptx"
++        shutil.copy2(pptx_src, pptx_in_tmp)
++        pptx_path = pptx_in_tmp
+ 
+-        # Step 2: Convert PPTX → PDF via LibreOffice
++        # Step 1: Convert PPTX → PDF via LibreOffice
+         result = run_soffice(
+             ["--headless", "--convert-to", "pdf", "--outdir", str(tmp_path), str(pptx_path)],
+             capture_output=True,
+diff --git a/backend/app/services/vision_qa.py b/backend/app/services/vision_qa.py
+new file mode 100644
+index 0000000..de3e546
+--- /dev/null
++++ b/backend/app/services/vision_qa.py
+@@ -0,0 +1,89 @@
++"""
++vision_qa.py — Visual QA for generated slide thumbnails.
++
++Sends JPEG thumbnails to a local vision model (via OpenAI-compatible API)
++and returns a list of per-slide issues found.
++
++Enabled only when `vision_model` is set in settings.
++"""
++import base64
++import json
++import logging
++from pathlib import Path
++
++import httpx
++
++log = logging.getLogger(__name__)
++
++_QA_PROMPT = """Check these presentation slides for visual issues:
++- Text overflow or cut off at edges
++- Elements overlapping in a way that hurts readability
++- Uneven spacing or excessive blank areas
++- Low contrast (text unreadable on background)
++- Numbers or words split awkwardly across lines
++Return JSON only: [{"slide": N, "issues": ["description"]}]
++Only include slides that have actual problems. Return [] if everything looks fine."""
++
++
++async def visual_qa_check(
++    thumbnail_paths: list[Path],
++    api_base_url: str,
++    api_key: str,
++    model: str,
++) -> list[dict]:
++    """
++    Send slide thumbnails to the vision model and return issues per slide.
++
++    Args:
++        thumbnail_paths: Ordered list of JPEG paths (slide_000.jpg, …).
++        api_base_url:    OpenAI-compatible API base URL.
++        api_key:         Bearer token for the API.
++        model:           Vision model ID.
++
++    Returns:
++        List of {"slide": N, "issues": [...]} dicts for slides with problems.
++        Returns [] on error (QA failure is non-fatal).
++    """
++    if not thumbnail_paths:
++        return []
++
++    content: list[dict] = []
++    for i, path in enumerate(thumbnail_paths):
++        try:
++            img_b64 = base64.standard_b64encode(path.read_bytes()).decode()
++        except OSError:
++            log.warning("vision_qa: cannot read thumbnail %s, skipping", path)
++            continue
++        content.append({
++            "type": "image_url",
++            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
++        })
++        content.append({"type": "text", "text": f"Slide {i + 1}"})
++
++    content.append({"type": "text", "text": _QA_PROMPT})
++
++    try:
++        async with httpx.AsyncClient(verify=False, timeout=120) as client:
++            resp = await client.post(
++                f"{api_base_url}/chat/completions",
++                headers={"Authorization": f"Bearer {api_key}"},
++                json={
++                    "model": model,
++                    "messages": [{"role": "user", "content": content}],
++                    "max_tokens": 1000,
++                },
++            )
++            resp.raise_for_status()
++            raw = resp.json()["choices"][0]["message"]["content"]
++
++        # Strip markdown fences if the model wraps JSON in ```json ... ```
++        raw = raw.strip()
++        if raw.startswith("```"):
++            lines = [l for l in raw.split("\n") if not l.strip().startswith("```")]
++            raw = "\n".join(lines).strip()
++
++        return json.loads(raw)
++
++    except Exception:
++        log.exception("vision_qa: QA check failed (non-fatal)")
++        return []
+diff --git a/data/chroma_db/chroma.sqlite3 b/data/chroma_db/chroma.sqlite3
+index 2162a0a..ad622f2 100644
+Binary files a/data/chroma_db/chroma.sqlite3 and b/data/chroma_db/chroma.sqlite3 differ
+diff --git a/frontend/src/components/StudioPanel.tsx b/frontend/src/components/StudioPanel.tsx
+index ea6ab75..4531db3 100644
+--- a/frontend/src/components/StudioPanel.tsx
++++ b/frontend/src/components/StudioPanel.tsx
+@@ -10,7 +10,6 @@ import {
+     ArtifactType,
+     StudioArtifact,
+     PodcastContent,
+-    SlidesContent,
+     MindMapContent,
+     FlashcardsContent,
+     QuizContent,
+@@ -66,6 +65,11 @@ interface Props {
+ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact; onAskQuestion?: (q: string) => void }) {
+     if (artifact.status !== "done") return null;
+ 
++    // Slides: LLM outputs PptxGenJS code stored in content_text; thumbnails served statically
++    if (artifact.artifact_type === "slides") {
++        return <SlidesViewer code={artifact.content_text} artifactId={artifact.id} />;
++    }
++
+     if (artifact.artifact_type === "video_script" || artifact.artifact_type === "report") {
+         // text-only types
+         if (artifact.artifact_type === "report") {
+@@ -79,16 +83,6 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
+         switch (artifact.artifact_type) {
+             case "podcast":
+                 return <PodcastViewer data={data as PodcastContent} />;
+-            case "slides": {
+-                // Defensively normalise: LLM sometimes wraps slides under a nested key
+-                const slidesData: SlidesContent = Array.isArray(data?.slides)
+-                    ? data
+-                    : data?.content ?? data;
+-                if (!Array.isArray(slidesData?.slides)) {
+-                    return <pre className="text-xs whitespace-pre-wrap text-gray-600">{artifact.content_json}</pre>;
+-                }
+-                return <SlidesViewer data={slidesData} artifactId={artifact.id} />;
+-            }
+             case "mindmap":
+                 return <MindMapViewer data={data as MindMapContent} onAskQuestion={onAskQuestion} />;
+             case "flashcards":
+diff --git a/frontend/src/components/studio/SlidesViewer.tsx b/frontend/src/components/studio/SlidesViewer.tsx
+index b832d14..b0466f6 100644
+--- a/frontend/src/components/studio/SlidesViewer.tsx
++++ b/frontend/src/components/studio/SlidesViewer.tsx
+@@ -1,627 +1,120 @@
+ "use client";
+ 
+-import { useState } from "react";
+-import { ChevronLeft, ChevronRight, Download } from "lucide-react";
+-import { SlidesContent, SlideItem, SlideCard as SlideCardData } from "@/lib/api";
++import { useState, useEffect } from "react";
++import { ChevronLeft, ChevronRight, Download, Loader2 } from "lucide-react";
+ 
+ interface Props {
+-    data: SlidesContent;
+-    artifactId?: number;
+-}
+-
+-// ── Theme system (from theme-factory) ────────────────────────
+-
+-interface ThemeColors {
+-    bg: string; accent: string; title: string;
+-    text: string; muted: string; cardBg: string;
+-}
+-
+-const SLIDE_THEMES: Record<string, ThemeColors> = {
+-    "tech-innovation":   { bg:"1E1E1E", accent:"0066FF", title:"FFFFFF", text:"CCCCCC", muted:"888888", cardBg:"2A2A2A" },
+-    "midnight-galaxy":   { bg:"2B1E3E", accent:"A490C2", title:"E6E6FA", text:"C8B8E0", muted:"6B5B8A", cardBg:"3A2D50" },
+-    "ocean-depths":      { bg:"1A2332", accent:"2D8B8B", title:"F1FAEE", text:"A8DADC", muted:"5A8A8A", cardBg:"243040" },
+-    "modern-minimalist": { bg:"FFFFFF", accent:"708090", title:"36454F", text:"36454F", muted:"A0A0A0", cardBg:"F0F0F0" },
+-    "sunset-boulevard":  { bg:"264653", accent:"E76F51", title:"E9C46A", text:"F4A261", muted:"A09060", cardBg:"314D5E" },
+-    "forest-canopy":     { bg:"2D4A2B", accent:"A4AC86", title:"FAF9F6", text:"C8CCB8", muted:"7D8471", cardBg:"3A5C38" },
+-    "golden-hour":       { bg:"4A403A", accent:"F4A900", title:"D4B896", text:"D4B896", muted:"C1666B", cardBg:"5A4E47" },
+-    "arctic-frost":      { bg:"FAFAFA", accent:"4A6FA5", title:"1A2332", text:"334155", muted:"909090", cardBg:"D4E4F7" },
+-    "desert-rose":       { bg:"E8D5C4", accent:"B87D6D", title:"5D2E46", text:"5D2E46", muted:"D4A5A5", cardBg:"F0E4D8" },
+-    "botanical-garden":  { bg:"F5F3ED", accent:"4A7C59", title:"333333", text:"555555", muted:"B7472A", cardBg:"EBE9E1" },
+-};
+-
+-// Shadow factory — MUST return a new object each call; pptxgenjs mutates options in-place
+-const makeShadow = () => ({ type: "outer" as const, color: "000000", blur: 6, offset: 2, angle: 135, opacity: 0.12 });
+-
+-// ── Slide layout builders (LAYOUT_16x9: 10" × 5.625") ─────────
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function addCount(sld: any, index: number, total: number, muted: string) {
+-    sld.addText(`${index + 1} / ${total}`, {
+-        x: 8.7, y: 5.2, w: 1.1, h: 0.3,
+-        fontSize: 9, color: muted, align: "right", margin: 0,
+-    });
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildCoverSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0.35, y: 1.3, w: 0.07, h: 3.0, fill: { color: t.accent }, line: { color: t.accent } });
+-    [[0.38, 9.05, 4.45], [0.24, 9.28, 4.68], [0.12, 9.45, 4.85]].forEach(([size, px, py]) => {
+-        sld.addShape(prs.shapes.RECTANGLE, { x: px, y: py, w: size, h: size, fill: { color: t.accent }, line: { color: t.accent } });
+-    });
+-    sld.addText(s.title, { x: 0.7, y: 1.6, w: 7.9, h: 1.4, fontSize: 36, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    if (s.subtitle) {
+-        sld.addText(s.subtitle, { x: 0.7, y: 3.2, w: 7.9, h: 0.65, fontSize: 18, color: t.muted, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    }
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildContentSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.09, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.5, y: 0.15, w: 9, h: 0.65, fontSize: 22, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    const bulletY = s.subtitle ? 1.08 : 0.92;
+-    if (s.subtitle) {
+-        sld.addText(s.subtitle, { x: 0.5, y: 0.85, w: 9, h: 0.35, fontSize: 12, color: t.muted, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    }
+-    const items = s.bullets.map((b, idx) => ({
+-        text: b,
+-        options: { bullet: true, paraSpaceAfter: 8, fontSize: 13, color: t.text, breakLine: idx < s.bullets.length - 1 },
+-    }));
+-    sld.addText(items, { x: 0.5, y: bulletY, w: 9, h: 5.625 - bulletY - 0.45, fontFace: "Microsoft JhengHei", shrinkText: true });
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildStatsSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.09, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.5, y: 0.15, w: 9, h: 0.65, fontSize: 22, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    const cols = [0.35, 5.2];
+-    const rows = [1.05, 3.1];
+-    s.bullets.slice(0, 4).forEach((bullet, ci) => {
+-        const cx = cols[ci % 2], cy = rows[Math.floor(ci / 2)];
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: cy, w: 4.5, h: 1.7, fill: { color: t.cardBg }, line: { color: t.cardBg }, shadow: makeShadow() });
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: cy, w: 4.5, h: 0.05, fill: { color: t.accent }, line: { color: t.accent } });
+-        const colonIdx = bullet.search(/[：:]/);
+-        const splitAt = colonIdx > 0 && colonIdx <= 8 ? colonIdx : -1;
+-        const bigText = splitAt > 0 ? bullet.slice(0, splitAt) : bullet.slice(0, 5);
+-        const smallText = splitAt > 0 ? bullet.slice(splitAt + 1).trim() : bullet.slice(5);
+-        sld.addText(bigText, { x: cx + 0.2, y: cy + 0.12, w: 4.1, h: 0.65, fontSize: 24, bold: true, color: t.accent, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        if (smallText) {
+-            sld.addText(smallText, { x: cx + 0.2, y: cy + 0.82, w: 4.1, h: 0.75, fontSize: 12, color: t.text, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        }
+-    });
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildQuoteSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addText("\u201C", { x: 0.3, y: 0.1, w: 1.5, h: 1.5, fontSize: 80, bold: true, color: t.accent, fontFace: "Georgia", margin: 0 });
+-    const quote = s.bullets[0] || s.title;
+-    sld.addText(quote, { x: 1.0, y: 1.1, w: 7.9, h: 2.6, fontSize: 22, italic: true, color: t.title, align: "center", fontFace: "Microsoft JhengHei", valign: "middle", shrinkText: true });
+-    if (s.subtitle) {
+-        sld.addText(`\u2014 ${s.subtitle}`, { x: 1.0, y: 4.3, w: 8.7, h: 0.5, fontSize: 13, color: t.muted, align: "right", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    }
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildSectionSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 2.55, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(`SECTION ${String(i + 1).padStart(2, "0")}`, {
+-        x: 0.6, y: 0.45, w: 8.5, h: 0.45, fontSize: 11, charSpacing: 4,
+-        color: "FFFFFF", fontFace: "Microsoft JhengHei", margin: 0,
+-    });
+-    sld.addText(s.title, { x: 0.6, y: 1.0, w: 8.5, h: 1.3, fontSize: 30, bold: true, color: "FFFFFF", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    if (s.subtitle) {
+-        sld.addText(s.subtitle, { x: 0.6, y: 2.9, w: 8.5, h: 0.85, fontSize: 16, color: t.text, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    }
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildConclusionSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0.35, y: 1.0, w: 0.07, h: 1.5, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.7, y: 1.05, w: 8.5, h: 1.1, fontSize: 30, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    if (s.subtitle) {
+-        sld.addText(s.subtitle, { x: 0.7, y: 2.25, w: 8.5, h: 0.55, fontSize: 15, color: t.muted, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    }
+-    const chipY = s.subtitle ? 3.15 : 2.9;
+-    const chipW = 4.2, chipH = 0.55;
+-    s.bullets.slice(0, 4).forEach((bullet, ci) => {
+-        const cx = 0.5 + (ci % 2) * (chipW + 0.2);
+-        const cy = chipY + Math.floor(ci / 2) * (chipH + 0.15);
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: cy, w: chipW, h: chipH, fill: { color: t.cardBg }, line: { color: t.cardBg } });
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: cy, w: 0.05, h: chipH, fill: { color: t.accent }, line: { color: t.accent } });
+-        const colonIdx = bullet.search(/[：:]/);
+-        const chipText = colonIdx > 0 ? bullet.slice(0, colonIdx) : bullet.slice(0, 20);
+-        sld.addText(chipText, { x: cx + 0.15, y: cy + 0.08, w: chipW - 0.25, h: chipH - 0.1, fontSize: 12, color: t.text, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    });
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// ── New layout PPTX builders ───────────────────────────────────
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildBigNumberSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.09, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.5, y: 0.2, w: 9, h: 0.6, fontSize: 20, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    // Large metric number centred
+-    const metricStr = (s.metric ?? "—") + (s.unit ? " " + s.unit : "");
+-    sld.addText(metricStr, { x: 1.5, y: 1.1, w: 7, h: 2.4, fontSize: 72, bold: true, color: t.accent, align: "center", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    // Divider line
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 3.5, y: 3.6, w: 3.0, h: 0.04, fill: { color: t.muted }, line: { color: t.muted } });
+-    // Label below
+-    if (s.label) {
+-        sld.addText(s.label, { x: 1.5, y: 3.75, w: 7, h: 0.65, fontSize: 18, color: t.text, align: "center", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    }
+-    // Optional supporting bullets at bottom
+-    if (s.bullets.length > 0) {
+-        sld.addText(s.bullets[0], { x: 1.5, y: 4.55, w: 7, h: 0.65, fontSize: 12, color: t.muted, align: "center", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-    }
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildDualCardSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.09, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.5, y: 0.18, w: 9, h: 0.6, fontSize: 20, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-
+-    const cards = [s.left_card, s.right_card];
+-    const xs = [0.3, 5.2];
+-    cards.forEach((card, ci) => {
+-        if (!card) return;
+-        const cx = xs[ci];
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: 0.95, w: 4.5, h: 4.3, fill: { color: t.cardBg }, line: { color: t.cardBg }, shadow: makeShadow() });
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: 0.95, w: 4.5, h: 0.06, fill: { color: t.accent }, line: { color: t.accent } });
+-        sld.addText(card.title, { x: cx + 0.2, y: 1.1, w: 4.1, h: 0.55, fontSize: 15, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        const items = (card.bullets ?? []).map((b, idx) => ({
+-            text: b,
+-            options: { bullet: true, paraSpaceAfter: 6, fontSize: 12, color: t.text, breakLine: idx < (card.bullets?.length ?? 0) - 1 },
+-        }));
+-        if (items.length > 0) {
+-            sld.addText(items, { x: cx + 0.2, y: 1.75, w: 4.1, h: 3.3, fontFace: "Microsoft JhengHei", shrinkText: true });
+-        }
+-    });
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildMultiCardSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.09, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.5, y: 0.18, w: 9, h: 0.6, fontSize: 20, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-
+-    const cards = (s.cards ?? []).slice(0, 6);
+-    const cols = cards.length <= 3 ? 3 : 3;
+-    const cardW = cards.length <= 3 ? 2.8 : 2.8;
+-    const cardH = cards.length <= 3 ? 3.5 : 1.95;
+-    const startX = cards.length <= 3 ? 0.55 : 0.25;
+-    const startY = 0.95;
+-
+-    cards.forEach((card, ci) => {
+-        const col = ci % cols;
+-        const row = Math.floor(ci / cols);
+-        const cx = startX + col * (cardW + 0.25);
+-        const cy = startY + row * (cardH + 0.2);
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: cy, w: cardW, h: cardH, fill: { color: t.cardBg }, line: { color: t.cardBg }, shadow: makeShadow() });
+-        sld.addShape(prs.shapes.RECTANGLE, { x: cx, y: cy, w: cardW, h: 0.05, fill: { color: t.accent }, line: { color: t.accent } });
+-        // Unicode icon placeholder (bullet character as icon)
+-        const iconGlyph = "◆";
+-        sld.addText(iconGlyph, { x: cx + 0.15, y: cy + 0.15, w: 0.5, h: 0.4, fontSize: 14, color: t.accent, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        sld.addText(card.title, { x: cx + 0.15, y: cy + 0.55, w: cardW - 0.3, h: 0.5, fontSize: 13, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        if (card.description) {
+-            sld.addText(card.description, { x: cx + 0.15, y: cy + 1.1, w: cardW - 0.3, h: cardH - 1.25, fontSize: 11, color: t.text, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        }
+-    });
+-    addCount(sld, i, total, t.muted);
+-}
+-
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildTableSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.09, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.5, y: 0.18, w: 9, h: 0.6, fontSize: 20, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-
+-    const headers = s.headers ?? [];
+-    const rows = (s.rows ?? []).slice(0, 8);
+-    if (headers.length === 0) {
+-        addCount(sld, i, total, t.muted);
+-        return;
+-    }
+-
+-    const colCount = headers.length;
+-    const colW = 9.2 / colCount;
+-    const tableRows: { text: string; options: Record<string, unknown> }[][] = [];
+-
+-    // Header row
+-    tableRows.push(headers.map((h) => ({
+-        text: h,
+-        options: { bold: true, color: "FFFFFF", fill: { color: t.accent }, fontSize: 12, align: "center", fontFace: "Microsoft JhengHei" },
+-    })));
+-
+-    // Data rows
+-    rows.forEach((row, ri) => {
+-        tableRows.push(headers.map((_, ci) => ({
+-            text: (row[ci] ?? ""),
+-            options: { color: t.text, fill: { color: ri % 2 === 0 ? t.cardBg : t.bg }, fontSize: 11, fontFace: "Microsoft JhengHei" },
+-        })));
+-    });
+-
+-    sld.addTable(tableRows, {
+-        x: 0.4, y: 1.0, w: 9.2, colW: Array(colCount).fill(colW),
+-        border: { color: t.muted, pt: 0.5 },
+-    });
+-    addCount(sld, i, total, t.muted);
++    /** PptxGenJS JavaScript code stored in artifact.content_text */
++    code: string;
++    artifactId: number;
++    title?: string;
+ }
+ 
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildFlowSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    sld.background = { color: t.bg };
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.09, fill: { color: t.accent }, line: { color: t.accent } });
+-    sld.addText(s.title, { x: 0.5, y: 0.18, w: 9, h: 0.6, fontSize: 20, bold: true, color: t.title, fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-
+-    const steps = (s.steps ?? []).slice(0, 5);
+-    if (steps.length === 0) {
+-        addCount(sld, i, total, t.muted);
+-        return;
+-    }
+-
+-    const stepW = 9.0 / steps.length;
+-    const circleY = 1.6;
+-    const circleR = 0.38;
+-
+-    steps.forEach((step, si) => {
+-        const cx = 0.5 + si * stepW + stepW / 2 - circleR;
+-        // Circle
+-        sld.addShape(prs.shapes.OVAL, { x: cx, y: circleY, w: circleR * 2, h: circleR * 2, fill: { color: t.accent }, line: { color: t.accent } });
+-        // Step number
+-        sld.addText(String(si + 1), { x: cx, y: circleY, w: circleR * 2, h: circleR * 2, fontSize: 14, bold: true, color: "FFFFFF", align: "center", valign: "middle", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        // Arrow connector (except last)
+-        if (si < steps.length - 1) {
+-            const arrowX = cx + circleR * 2 + 0.05;
+-            sld.addShape(prs.shapes.RECTANGLE, { x: arrowX, y: circleY + circleR - 0.02, w: stepW - circleR * 2 - 0.1, h: 0.04, fill: { color: t.muted }, line: { color: t.muted } });
+-        }
+-        // Label
+-        sld.addText(step.label, { x: cx - 0.35, y: circleY + circleR * 2 + 0.15, w: circleR * 2 + 0.7, h: 0.5, fontSize: 12, bold: true, color: t.title, align: "center", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        // Description
+-        if (step.description) {
+-            sld.addText(step.description, { x: cx - 0.35, y: circleY + circleR * 2 + 0.75, w: circleR * 2 + 0.7, h: 1.8, fontSize: 10, color: t.text, align: "center", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
+-        }
+-    });
+-    addCount(sld, i, total, t.muted);
++function thumbUrl(artifactId: number, index: number): string {
++    return `/thumbnails/${artifactId}/slide_${String(index).padStart(3, "0")}.jpg`;
+ }
+ 
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-function buildHeroTextSlide(prs: any, sld: any, s: SlideItem, t: ThemeColors, total: number, i: number) {
+-    // Full-page dark accent background
+-    sld.background = { color: t.accent };
+-    // Subtle corner decorations
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 1.5, h: 0.08, fill: { color: "FFFFFF" }, line: { color: "FFFFFF" } });
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 0, y: 0, w: 0.08, h: 1.5, fill: { color: "FFFFFF" }, line: { color: "FFFFFF" } });
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 8.5, y: 5.545, w: 1.5, h: 0.08, fill: { color: "FFFFFF" }, line: { color: "FFFFFF" } });
+-    sld.addShape(prs.shapes.RECTANGLE, { x: 9.92, y: 4.1, w: 0.08, h: 1.5, fill: { color: "FFFFFF" }, line: { color: "FFFFFF" } });
+-    // Large centred title
+-    sld.addText(s.title, { x: 0.7, y: 1.3, w: 8.6, h: 1.8, fontSize: 38, bold: true, color: "FFFFFF", align: "center", fontFace: "Microsoft JhengHei", valign: "middle", margin: 0 });
+-    if (s.subtitle) {
+-        sld.addText(s.subtitle, { x: 0.7, y: 3.3, w: 8.6, h: 1.0, fontSize: 18, color: "FFFFFF", align: "center", fontFace: "Microsoft JhengHei", margin: 0, shrinkText: true });
++/** Probe how many JPEG thumbnails exist for this artifact by loading images. */
++async function probeSlideCount(artifactId: number): Promise<number> {
++    let count = 0;
++    while (count < 60) {
++        const ok = await new Promise<boolean>((resolve) => {
++            const img = new Image();
++            img.onload = () => resolve(true);
++            img.onerror = () => resolve(false);
++            img.src = thumbUrl(artifactId, count);
++        });
++        if (!ok) break;
++        count++;
+     }
+-    sld.addText(`${i + 1} / ${total}`, { x: 8.7, y: 5.2, w: 1.1, h: 0.3, fontSize: 9, color: "FFFFFF", align: "right", margin: 0 });
++    return count;
+ }
+ 
+-// ── PPTX download ─────────────────────────────────────────────
+-
+-async function downloadPptx(data: SlidesContent) {
+-    const pptxgen = (await import("pptxgenjs")).default;
+-    const prs = new pptxgen();
+-    prs.layout = "LAYOUT_16x9"; // 10" × 5.625"
+-
+-    const themeName = data.theme ?? "tech-innovation";
+-    const baseTheme = SLIDE_THEMES[themeName] ?? SLIDE_THEMES["tech-innovation"];
+-    const accentOverride = /^[0-9A-Fa-f]{6}$/.test(data.accent_color ?? "") ? data.accent_color! : baseTheme.accent;
+-    const t: ThemeColors = { ...baseTheme, accent: accentOverride };
+-
+-    const total = data.slides.length;
+-    data.slides.forEach((slide, i) => {
+-        const sld = prs.addSlide();
+-        const layout = slide.layout_type ?? "content";
+-
+-        if (layout === "cover")           buildCoverSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "stats")      buildStatsSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "quote")      buildQuoteSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "section")    buildSectionSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "conclusion") buildConclusionSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "big_number") buildBigNumberSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "dual_card")  buildDualCardSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "multi_card") buildMultiCardSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "table")      buildTableSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "flow")       buildFlowSlide(prs, sld, slide, t, total, i);
+-        else if (layout === "hero_text")  buildHeroTextSlide(prs, sld, slide, t, total, i);
+-        else                              buildContentSlide(prs, sld, slide, t, total, i);
+-    });
+-
+-    prs.writeFile({ fileName: `${data.title || "簡報"}.pptx` });
+-}
+-
+-// ── Slide thumbnail (server-rendered preview) ─────────────────
+-
+-function SlideThumbnail({
+-    artifactId,
+-    index,
+-    onError,
+-}: {
+-    artifactId: number;
+-    index: number;
+-    onError: () => void;
+-}) {
+-    const url = `/thumbnails/${artifactId}/slide_${String(index).padStart(3, "0")}.jpg`;
+-    return (
+-        <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
+-            <img
+-                src={url}
+-                alt={`投影片 ${index + 1}`}
+-                onError={onError}
+-                className="absolute inset-0 w-full h-full object-cover rounded-t-xl"
+-            />
+-        </div>
+-    );
+-}
+-
+-// ── Slide card text renderers by layout ───────────────────────
+-
+-function SlideCardText({ slide, index, total }: { slide: SlideItem; index: number; total: number }) {
+-    const layout = slide.layout_type ?? "content";
+-
+-    const header = (
+-        <div className="px-5 pt-4 pb-3 border-b border-gray-100">
+-            <div className="flex items-center gap-2 mb-1.5">
+-                <span className="text-xs font-medium text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">
+-                    {index + 1} / {total}
+-                </span>
+-                <span className="text-xs text-gray-400">{layout}</span>
+-            </div>
+-            <h4 className="font-bold text-gray-800 text-base leading-snug">{slide.title}</h4>
+-            {slide.subtitle && <p className="text-sm text-gray-500 mt-0.5 leading-relaxed">{slide.subtitle}</p>}
+-        </div>
+-    );
++export function SlidesViewer({ artifactId, title }: Props) {
++    const [index, setIndex] = useState(0);
++    const [slideCount, setSlideCount] = useState<number | null>(null);
+ 
+-    if (layout === "big_number") {
+-        return (
+-            <div className="rounded-xl border-2 border-gray-200 bg-white min-h-[260px] flex flex-col shadow-sm overflow-hidden">
+-                {header}
+-                <div className="flex flex-col items-center justify-center flex-1 py-6 gap-1">
+-                    <div className="text-6xl font-black text-blue-600 leading-none">
+-                        {slide.metric ?? "—"}{slide.unit && <span className="text-3xl ml-1">{slide.unit}</span>}
+-                    </div>
+-                    {slide.label && <p className="text-base text-gray-600 mt-2">{slide.label}</p>}
+-                    {slide.bullets[0] && <p className="text-xs text-gray-400 mt-1">{slide.bullets[0]}</p>}
+-                </div>
+-            </div>
+-        );
+-    }
++    useEffect(() => {
++        setIndex(0);
++        probeSlideCount(artifactId).then(setSlideCount);
++    }, [artifactId]);
+ 
+-    if (layout === "dual_card") {
+-        return (
+-            <div className="rounded-xl border-2 border-gray-200 bg-white min-h-[260px] flex flex-col shadow-sm overflow-hidden">
+-                {header}
+-                <div className="flex gap-3 p-4 flex-1">
+-                    {[slide.left_card, slide.right_card].map((card, ci) => card && (
+-                        <div key={ci} className="flex-1 bg-gray-50 rounded-lg p-3 border border-gray-200">
+-                            <p className="font-semibold text-gray-700 text-sm mb-2">{card.title}</p>
+-                            <ul className="flex flex-col gap-1.5">
+-                                {(card.bullets ?? []).map((b, bi) => (
+-                                    <li key={bi} className="flex items-start gap-2 text-xs text-gray-600">
+-                                        <span className="mt-1.5 w-1 h-1 rounded-full bg-blue-400 flex-shrink-0" />
+-                                        {b}
+-                                    </li>
+-                                ))}
+-                            </ul>
+-                        </div>
+-                    ))}
+-                </div>
+-            </div>
+-        );
+-    }
++    const downloadUrl = `/thumbnails/${artifactId}/slides.pptx`;
+ 
+-    if (layout === "multi_card") {
+-        const cards: SlideCardData[] = slide.cards ?? [];
++    if (slideCount === null) {
+         return (
+-            <div className="rounded-xl border-2 border-gray-200 bg-white min-h-[260px] flex flex-col shadow-sm overflow-hidden">
+-                {header}
+-                <div className="grid grid-cols-2 gap-3 p-4 flex-1">
+-                    {cards.slice(0, 6).map((card, ci) => (
+-                        <div key={ci} className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+-                            <div className="flex items-center gap-2 mb-1.5">
+-                                <span className="text-blue-500 text-sm">◆</span>
+-                                <p className="font-semibold text-gray-700 text-xs">{card.title}</p>
+-                            </div>
+-                            {card.description && <p className="text-xs text-gray-500 leading-relaxed">{card.description}</p>}
+-                        </div>
+-                    ))}
+-                </div>
++            <div className="flex items-center justify-center h-48 text-gray-400 gap-2">
++                <Loader2 className="w-4 h-4 animate-spin" />
++                正在載入縮圖…
+             </div>
+         );
+     }
+ 
+-    if (layout === "table") {
+-        const headers = slide.headers ?? [];
+-        const rows = slide.rows ?? [];
++    if (slideCount === 0) {
+         return (
+-            <div className="rounded-xl border-2 border-gray-200 bg-white min-h-[260px] flex flex-col shadow-sm overflow-hidden">
+-                {header}
+-                <div className="p-4 overflow-auto flex-1">
+-                    {headers.length > 0 ? (
+-                        <table className="w-full text-xs border-collapse">
+-                            <thead>
+-                                <tr>
+-                                    {headers.map((h, hi) => (
+-                                        <th key={hi} className="bg-blue-500 text-white px-3 py-1.5 text-left font-semibold border border-blue-400">{h}</th>
+-                                    ))}
+-                                </tr>
+-                            </thead>
+-                            <tbody>
+-                                {rows.map((row, ri) => (
+-                                    <tr key={ri} className={ri % 2 === 0 ? "bg-white" : "bg-gray-50"}>
+-                                        {headers.map((_, ci) => (
+-                                            <td key={ci} className="px-3 py-1.5 text-gray-700 border border-gray-200">{row[ci] ?? ""}</td>
+-                                        ))}
+-                                    </tr>
+-                                ))}
+-                            </tbody>
+-                        </table>
+-                    ) : (
+-                        <p className="text-xs text-gray-400">（無表格資料）</p>
+-                    )}
+-                </div>
++            <div className="flex flex-col items-center justify-center h-48 text-gray-400 text-sm gap-2">
++                <Loader2 className="w-4 h-4 animate-spin" />
++                縮圖生成中，請稍後重新整理…
+             </div>
+         );
+     }
+ 
+-    if (layout === "flow") {
+-        const steps = slide.steps ?? [];
+-        return (
+-            <div className="rounded-xl border-2 border-gray-200 bg-white min-h-[260px] flex flex-col shadow-sm overflow-hidden">
+-                {header}
+-                <div className="flex items-start gap-2 p-4 overflow-x-auto flex-1">
+-                    {steps.map((step, si) => (
+-                        <div key={si} className="flex items-start gap-2 min-w-0">
+-                            <div className="flex flex-col items-center gap-1">
+-                                <div className="w-8 h-8 rounded-full bg-blue-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+-                                    {si + 1}
+-                                </div>
+-                                <div className="flex-1 text-center">
+-                                    <p className="font-semibold text-gray-700 text-xs mt-1">{step.label}</p>
+-                                    {step.description && <p className="text-xs text-gray-500 mt-0.5 leading-tight">{step.description}</p>}
+-                                </div>
+-                            </div>
+-                            {si < steps.length - 1 && (
+-                                <div className="mt-3.5 text-gray-300 text-sm flex-shrink-0">→</div>
+-                            )}
+-                        </div>
+-                    ))}
+-                </div>
+-            </div>
+-        );
+-    }
+-
+-    if (layout === "hero_text") {
+-        return (
+-            <div className="rounded-xl border-2 border-blue-500 bg-blue-600 min-h-[260px] flex flex-col shadow-sm overflow-hidden">
+-                <div className="flex flex-col items-center justify-center flex-1 p-8 text-center gap-3">
+-                    <span className="text-xs font-medium text-blue-200 bg-blue-700 px-2 py-0.5 rounded-full">
+-                        {index + 1} / {total}
+-                    </span>
+-                    <h4 className="font-black text-white text-2xl leading-snug">{slide.title}</h4>
+-                    {slide.subtitle && <p className="text-blue-100 text-sm leading-relaxed">{slide.subtitle}</p>}
+-                </div>
+-            </div>
+-        );
+-    }
+-
+-    // Default: content, stats, quote, section, conclusion — bullet list
+-    return (
+-        <div className="rounded-xl border-2 border-gray-200 bg-white min-h-[260px] flex flex-col shadow-sm overflow-hidden">
+-            {header}
+-            <ul className="px-5 py-4 flex flex-col gap-3 flex-1">
+-                {slide.bullets.map((b, i) => (
+-                    <li key={i} className="flex items-start gap-3 text-sm text-gray-700 leading-relaxed">
+-                        <span className="mt-2 w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+-                        {b}
+-                    </li>
+-                ))}
+-            </ul>
+-        </div>
+-    );
+-}
+-
+-// ── Slide card (thumbnail + text fallback) ────────────────────
+-
+-function SlideCardDisplay({
+-    slide,
+-    index,
+-    total,
+-    artifactId,
+-}: {
+-    slide: SlideItem;
+-    index: number;
+-    total: number;
+-    artifactId?: number;
+-}) {
+-    const [thumbFailed, setThumbFailed] = useState(false);
+-    const showThumb = artifactId != null && !thumbFailed;
+-
+-    if (showThumb) {
+-        return (
+-            <div className="rounded-xl border-2 border-gray-200 bg-white shadow-sm overflow-hidden">
+-                <SlideThumbnail artifactId={artifactId} index={index} onError={() => setThumbFailed(true)} />
+-                <div className="px-5 py-3 border-t border-gray-100">
+-                    <div className="flex items-center gap-2 mb-1">
+-                        <span className="text-xs font-medium text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">
+-                            {index + 1} / {total}
+-                        </span>
+-                    </div>
+-                    <p className="font-semibold text-gray-800 text-sm leading-snug">{slide.title}</p>
+-                </div>
+-            </div>
+-        );
+-    }
+-
+-    return <SlideCardText slide={slide} index={index} total={total} />;
+-}
+-
+-// ── Main ──────────────────────────────────────────────────────
+-
+-export function SlidesViewer({ data, artifactId }: Props) {
+-    const [index, setIndex] = useState(0);
+-    const total = data.slides.length;
+-    const slide = data.slides[index];
++    const clamp = (i: number) => Math.max(0, Math.min(slideCount - 1, i));
+ 
+     return (
+         <div className="flex flex-col gap-4">
+             {/* Title + download */}
+             <div className="flex items-center justify-between">
+-                <h3 className="font-bold text-base text-gray-800">{data.title}</h3>
+-                <button
+-                    onClick={() => downloadPptx(data)}
++                <h3 className="font-bold text-base text-gray-800">{title || "簡報"}</h3>
++                <a
++                    href={downloadUrl}
++                    download={`${title || "簡報"}.pptx`}
+                     className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-gray-500 hover:bg-gray-100 transition-colors"
+                     title="下載 PPTX"
+                 >
+                     <Download className="w-3.5 h-3.5" />
+                     下載
+-                </button>
++                </a>
+             </div>
+ 
+-            {/* Slide card — shows thumbnail when available, text fallback otherwise */}
+-            <SlideCardDisplay slide={slide} index={index} total={total} artifactId={artifactId} />
++            {/* Slide thumbnail */}
++            <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
++                <img
++                    key={index}
++                    src={thumbUrl(artifactId, index)}
++                    alt={`投影片 ${index + 1}`}
++                    className="absolute inset-0 w-full h-full object-cover rounded-xl border border-gray-200 shadow-sm"
++                />
++            </div>
++
++            {/* Page counter */}
++            <div className="text-center text-xs text-gray-400">
++                {index + 1} / {slideCount}
++            </div>
+ 
+             {/* Navigation */}
+             <div className="flex items-center justify-between">
+                 <button
+-                    onClick={() => setIndex((i) => Math.max(0, i - 1))}
++                    onClick={() => setIndex(clamp(index - 1))}
+                     disabled={index === 0}
+                     className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 disabled:opacity-30 text-sm transition-colors"
+                 >
+                     <ChevronLeft className="w-4 h-4" /> 上一頁
+                 </button>
+-                <div className="flex gap-1">
+-                    {data.slides.map((_, i) => (
++                <div className="flex gap-1 flex-wrap justify-center max-w-xs">
++                    {Array.from({ length: slideCount }, (_, i) => (
+                         <button
+                             key={i}
+                             onClick={() => setIndex(i)}
+-                            className={`w-2 h-2 rounded-full transition-colors ${i === index ? "bg-blue-500" : "bg-gray-300 hover:bg-gray-400"}`}
++                            className={`w-2 h-2 rounded-full transition-colors ${
++                                i === index ? "bg-blue-500" : "bg-gray-300 hover:bg-gray-400"
++                            }`}
+                         />
+                     ))}
+                 </div>
+                 <button
+-                    onClick={() => setIndex((i) => Math.min(total - 1, i + 1))}
+-                    disabled={index === total - 1}
++                    onClick={() => setIndex(clamp(index + 1))}
++                    disabled={index === slideCount - 1}
+                     className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 disabled:opacity-30 text-sm transition-colors"
+                 >
+                     下一頁 <ChevronRight className="w-4 h-4" />

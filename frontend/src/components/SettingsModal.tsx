@@ -156,6 +156,32 @@ export function SettingsModal({
                     </div>
 
                     <div>
+                        <label htmlFor="vision-model" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
+                            視覺模型 (Vision) <span className="text-[var(--text-muted)]">— 用於 OCR 補充理解與投影片品質檢查</span>
+                        </label>
+                        {loadingModels ? (
+                            <div className="flex items-center gap-2 px-3 py-2 text-sm text-[var(--text-muted)]">
+                                <Loader2 className="w-4 h-4 animate-spin" /> 載入模型列表中...
+                            </div>
+                        ) : (
+                            <select
+                                id="vision-model"
+                                value={settingsForm.vision_model || ""}
+                                onChange={(e) => onFormChange({ ...settingsForm, vision_model: e.target.value })}
+                                className="w-full px-3 py-2 bg-[var(--bg-tertiary)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] focus:border-primary-500/50 outline-none transition-colors"
+                            >
+                                <option value="">（不啟用 VLM）</option>
+                                {availableModels.length === 0 && settingsForm.vision_model && (
+                                    <option value={settingsForm.vision_model}>{settingsForm.vision_model}</option>
+                                )}
+                                {availableModels.map((m) => (
+                                    <option key={m.id} value={m.id}>{m.id}</option>
+                                ))}
+                            </select>
+                        )}
+                    </div>
+
+                    <div>
                         <label htmlFor="temperature" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
                             Temperature: {settingsForm.temperature?.toFixed(2) ?? "0.10"}
                         </label>

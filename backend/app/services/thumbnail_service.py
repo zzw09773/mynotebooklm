@@ -1,12 +1,13 @@
 """
 Thumbnail generation pipeline for slides artifacts.
 
-Pipeline: slides JSON → python-pptx → soffice (PPTX→PDF) → fitz (PDF→JPEG)
+Pipeline: PPTX → soffice (PPTX→PDF) → fitz (PDF→JPEG)
 
 Thumbnails are stored at:  /data/thumbnails/{artifact_id}/slide_NNN.jpg
 Served at:                 /thumbnails/{artifact_id}/slide_NNN.jpg  (StaticFiles)
 """
 import logging
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -14,7 +15,6 @@ import fitz  # PyMuPDF
 import pikepdf
 
 from app.scripts.soffice import run_soffice
-from app.services.pptx_generator import generate_pptx
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +44,14 @@ def thumbnails_exist(artifact_id: int) -> bool:
 
 # ── Generation pipeline ───────────────────────────────────────
 
-def generate_thumbnails(artifact_id: int, content_json: str) -> list[str]:
+def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
     """
-    Full blocking pipeline: JSON → PPTX → PDF → JPEG thumbnails.
+    Blocking pipeline: PPTX → PDF → JPEG thumbnails.
+
+    Args:
+        artifact_id: Studio artifact ID (used for output directory naming).
+        pptx_path:   Path to an already-generated .pptx file.
+
     Returns list of thumbnail URL paths on success, empty list on failure.
     """
     out_dir = _thumb_dir(artifact_id)
@@ -54,16 +59,14 @@ def generate_thumbnails(artifact_id: int, content_json: str) -> list[str]:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        pptx_path = tmp_path / "slides.pptx"
 
-        # Step 1: Generate PPTX from slides JSON
-        try:
-            generate_pptx(content_json, pptx_path)
-        except Exception:
-            log.exception("PPTX generation failed for artifact %d", artifact_id)
-            return []
+        # Copy the PPTX into the temp dir so soffice writes its PDF there
+        pptx_src = Path(pptx_path)
+        pptx_in_tmp = tmp_path / "slides.pptx"
+        shutil.copy2(pptx_src, pptx_in_tmp)
+        pptx_path = pptx_in_tmp
 
-        # Step 2: Convert PPTX → PDF via LibreOffice
+        # Step 1: Convert PPTX → PDF via LibreOffice
         result = run_soffice(
             ["--headless", "--convert-to", "pdf", "--outdir", str(tmp_path), str(pptx_path)],
             capture_output=True,

@@ -7,6 +7,9 @@ Generates 9 types of AI content from a project's documents:
 import asyncio
 import json
 import logging
+import shutil
+import tempfile
+from pathlib import Path
 
 from llama_index.core.llms import ChatMessage, MessageRole
 
@@ -36,103 +39,103 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
 5. 輸出必須是合法的 JSON。
 """
 
-SLIDES_PROMPT = """你是一位專業的簡報設計師。請根據以下文件內容，產生一份視覺多元的簡報 JSON。
+SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 PptxGenJS 程式碼。
 
-═══════════════════════════════════════
-【絕對禁止——違反以下任何一條即為錯誤】
-═══════════════════════════════════════
-1. conclusion 只能出現 1 次，必須是最後一張。禁止在中間章節放 conclusion。
-2. cover 只能出現 1 次，必須是第一張。
-3. 禁止重複結構：不可把簡報分成「兩個各自完整的弧線」——整份只有一個開頭和一個結尾。
-4. hero_text 最多 1 張。section 最多 3 張。quote 最多 1 張。
-5. content 版面不超過總頁數的 25%（例如 14 頁簡報最多 3 頁 content）。
-6. 每條 bullet 不超過 25 個中文字。title 不超過 15 個中文字。subtitle 不超過 20 個中文字。
+═══ 環境 ═══
+`pres`已建立。`addIcon(sld,name,colorHex,x,y,w,h)`可用。畫布10"×5.625"。
+禁用require/import/writeFile/fs/process/module/exports。
+Icon: FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp FaExchangeAlt FaBalanceScale FaHandshake FaTrophy FaFlag FaHeart FaMoneyBillWave FaClipboardList FaSearchDollar FaBullseye FaProjectDiagram FaSitemap FaRegCalendarAlt FaUserTie FaBriefcase MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights MdTrendingUp MdCompareArrows MdTimeline MdAssessment
 
-═══════════════════════════════════════
-【基本要求】
-═══════════════════════════════════════
-- 總頁數：12-16 張（含封面和結論）
-- 至少使用 6 種不同的 layout_type
-- 使用繁體中文（icon 名稱和 visual_keywords 用英文）
-- 輸出純 JSON，不加 markdown 標記
+═══ 步驟一：敘事弧線 ═══
+匯報型:背景→發現→數據→啟示→結論 | 提案型:痛點→方案→可行性→佐證→行動
+分析型:定義→拆解→案例→利弊→建議 | 教學型:重要性→概念→步驟→案例→回顧
+敘事型:背景→經過→轉折→影響→結語
+根據弧線重新組織內容順序，不要逐段搬原文。
 
-═══════════════════════════════════════
-【敘事結構】先判斷文件類型：
-═══════════════════════════════════════
-- 匯報型：背景 → 行動/方法 → 成果數據 → 結論
-- 提案型：問題/機會 → 解決方案 → 執行計畫 → 行動呼籲
-- 教學型：概念 → 原理 → 步驟 → 應用
-- 分析型：背景 → 發現 → 洞察 → 建議
+═══ 步驟二：選版面（相鄰不重複，≥5種）═══
+1-3個數字→big_number | 比較兩者→dual_column | 3-4並列→card_grid
+有序步驟→process_flow | 結構化數據→table | 趨勢佔比→chart
+金句→quote_slide | 章節轉換→section_divider | 其餘→content_with_icon
+連續3頁密集內容後插入section_divider或quote_slide。
 
-═══════════════════════════════════════
-【12 種版面格式】（每張必須指定 layout_type）
-═══════════════════════════════════════
+═══ 步驟三：色票(bg/accent/title/text/muted/cardBg) ═══
+tech-innovation(科技AI):1E1E1E/0066FF/FFFFFF/CCCCCC/888888/2A2A2A
+ocean-depths(商業財務):1A2332/2D8B8B/F1FAEE/A8DADC/5A8A8A/243040
+sunset-boulevard(行銷旅遊):264653/E76F51/E9C46A/F4A261/A09060/314D5E
+forest-canopy(環境健康):2D4A2B/A4AC86/FAF9F6/C8CCB8/7D8471/3A5C38
+golden-hour(文化歷史):4A403A/F4A900/D4B896/D4B896/C1666B/5A4E47
+arctic-frost(科學醫療):FAFAFA/4A6FA5/1A2332/334155/909090/D4E4F7
+botanical-garden(教育科普):F5F3ED/4A7C59/333333/555555/B7472A/EBE9E1
+sports-arena(運動競技):1B1F3B/E63946/FFFFFF/D0D0D0/6C7A96/252A4A
+modern-minimalist(設計建築):FFFFFF/708090/36454F/36454F/A0A0A0/F0F0F0
+midnight-galaxy(娛樂創意):2B1E3E/A490C2/E6E6FA/C8B8E0/6B5B8A/3A2D50
+desert-rose(時尚精品):E8D5C4/B87D6D/5D2E46/5D2E46/D4A5A5/F0E4D8
 
-cover    第一張封面
-  必填：title, subtitle
-  示例：{"layout_type":"cover","title":"AI治理實務","subtitle":"ISO 42001 導入報告","bullets":[],"visual_keywords":["governance"]}
+═══ 固定開頭 ═══
+pres.defineLayout({name:"16x9",width:10,height:5.625});
+pres.layout="16x9";
+const theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
+const FONT="Microsoft JhengHei";
 
-section  章節分隔（最多3張）
-  必填：title  可選：subtitle
-  示例：{"layout_type":"section","title":"導入背景與挑戰","bullets":[],"visual_keywords":["context"]}
+═══ 共用標題（cover/section_divider/quote_slide除外）═══
+sld.addShape(pres.ShapeType.rect,{x:0,y:0,w:10,h:0.06,fill:{color:theme.accent}});
+sld.addText("標題",{x:0.5,y:0.2,w:9,h:0.6,fontSize:24,color:theme.title,fontFace:FONT,bold:true,shrinkText:true});
 
-content  一般說明（最多佔25%）
-  必填：title, bullets（3-4條，每條≤25字）
-  示例：{"layout_type":"content","title":"核心架構說明","bullets":["第一條要點，精煉","第二條要點，精煉"],"visual_keywords":["structure"]}
+═══ 版面範例 ═══
 
-big_number  大數字指標（展示單一 KPI）
-  必填：metric, label  可選：unit, title, bullets（1條補充說明）
-  示例：{"layout_type":"big_number","title":"關鍵成效","metric":"87","unit":"%","label":"合規達成率","bullets":["相較去年提升 12%"],"visual_keywords":["kpi"]}
+【cover】bg=theme.bg。頂部accent條h:0.06。左裝飾線x:0.5,y:1.5,w:0.07,h:2.4。主標題x:0.85,y:1.5,w:8.5,h:1.2,fontSize:40。副標x:0.85,y:2.85,fontSize:18,color:muted。右下色塊x:8.8,y:4.6,w:1,h:0.8。
 
-dual_card  左右對比（比較/Before-After）
-  必填：title, left_card{title,bullets}, right_card{title,bullets}
-  示例：{"layout_type":"dual_card","title":"導入前後對比","left_card":{"title":"導入前","bullets":["人工審查","回應慢"]},"right_card":{"title":"導入後","bullets":["自動化","即時回應"]},"bullets":[],"visual_keywords":["comparison"]}
+【section_divider】bg=accent。"SECTION 0N"x:0.6,y:1.2,fontSize:14,color:bg,charSpacing:4。標題x:0.6,y:1.8,fontSize:36,color:FFFFFF。描述x:0.6,y:3.3。
 
-multi_card  多格卡片（3-4個並列）
-  必填：title, cards（每張必填 icon + title + description）
-  icon 從以下選擇：FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights
-  示例：{"layout_type":"multi_card","title":"四大核心模組","cards":[{"icon":"FaShieldAlt","title":"風險管控","description":"識別並降低AI風險"},{"icon":"FaChartLine","title":"績效追蹤","description":"量化成效指標"}],"bullets":[],"visual_keywords":["modules"]}
+【big_number — 多數字並排（關鍵範例）】
+const stats=[{num:"16",unit:"分鐘",label:"出場時間"},{num:"8.2",unit:"分",label:"場均得分"},{num:"+3",unit:"",label:"正負值"}];
+const cardW=2.7,gap=0.45,startX=(10-(stats.length*cardW+(stats.length-1)*gap))/2;
+stats.forEach((s,i)=>{
+  const cx=startX+i*(cardW+gap);
+  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.3,w:cardW,h:3.0,fill:{color:theme.cardBg},rectRadius:0.08});
+  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.3,w:cardW,h:0.06,fill:{color:theme.accent}});
+  sld.addText(s.num,{x:cx,y:1.6,w:cardW,h:1.4,fontSize:52,color:theme.accent,fontFace:FONT,bold:true,align:"center",valign:"middle",shrinkText:true});
+  if(s.unit)sld.addText(s.unit,{x:cx,y:2.9,w:cardW,h:0.4,fontSize:14,color:theme.muted,fontFace:FONT,align:"center",shrinkText:true});
+  sld.addText(s.label,{x:cx+0.2,y:3.5,w:cardW-0.4,h:0.5,fontSize:13,color:theme.text,fontFace:FONT,align:"center",shrinkText:true});
+});
+單一大數字：數字fontSize:100,x:0.5,y:1.4,w:9,h:2.2,align:center。說明y:3.6,fontSize:16,color:muted。
 
-stats  數字統計卡（2-4個數字）
-  必填：title, bullets（格式：「數字：說明」，每條≤15字）
-  示例：{"layout_type":"stats","title":"成果數字","bullets":["98%：系統可用率","1,200：新增用戶","3.2x：效能提升"],"visual_keywords":["metrics"]}
+【dual_column】左卡x:0.4,y:1.15,w:4.35,h:3.6,fill:cardBg。頂部accent條h:0.06。icon+標題fontSize:18+要點列表fontSize:13。中間"VS"x:4.35,y:2.6。右卡x:5.25,結構同左。
 
-table  表格對比（規格/時程/數據）
-  必填：title, headers（陣列）, rows（2D陣列，每格≤10字）
-  示例：{"layout_type":"table","title":"方案比較","headers":["項目","方案A","方案B"],"rows":[["成本","低","高"],["功能","基本","完整"]],"bullets":[],"visual_keywords":["comparison"]}
+【card_grid（關鍵範例）】
+const items=[{icon:"FaChartLine",t:"概念一",d:"說明"},{icon:"FaUsers",t:"概念二",d:"說明"},{icon:"FaLightbulb",t:"概念三",d:"說明"}];
+const n=items.length,cW=2.7,cG=0.45,cX=(10-(n*cW+(n-1)*cG))/2;
+items.forEach((it,i)=>{
+  const cx=cX+i*(cW+cG);
+  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.2,w:cW,h:3.4,fill:{color:theme.cardBg},rectRadius:0.08});
+  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.2,w:cW,h:0.06,fill:{color:theme.accent}});
+  addIcon(sld,it.icon,"#"+theme.accent,cx+0.2,1.55,0.45,0.45);
+  sld.addText(it.t,{x:cx+0.2,y:2.15,w:cW-0.4,h:0.45,fontSize:16,color:theme.title,fontFace:FONT,bold:true,shrinkText:true});
+  sld.addText(it.d,{x:cx+0.2,y:2.7,w:cW-0.4,h:1.6,fontSize:12,color:theme.text,fontFace:FONT,valign:"top",shrinkText:true});
+});
 
-flow  流程圖（3-5個步驟）
-  必填：title, steps（每步：label≤8字，description≤15字）
-  示例：{"layout_type":"flow","title":"實施四步驟","steps":[{"label":"需求分析","description":"蒐集利害關係人意見"},{"label":"設計規劃","description":"制定治理框架"}],"bullets":[],"visual_keywords":["process"]}
+【process_flow】圓形r=0.35水平排列。連接線y:1.85。sGap=(9.0-sN*0.7)/(sN-1)。每步：accent圓+白色編號fontSize:16 → 標題y:2.5,fontSize:14 → 說明y:2.95,fontSize:11。
 
-quote  引言（最多1張）
-  必填：title, bullets[0]（引言內容，≤40字）  可選：subtitle（來源）
-  示例：{"layout_type":"quote","title":"核心洞見","subtitle":"— ISO 42001:2023","bullets":["AI治理的本質是讓技術為人服務，而非反之"],"visual_keywords":["insight"]}
+【content_with_icon】左icon x:0.5,y:1.4,w:0.9。垂直線x:1.7,w:0.04,h:3.2。右側addText陣列x:2.0,w:7.5交替粗體標題fontSize:16+說明fontSize:13。
 
-hero_text  全版大字轉場（最多1張）
-  必填：title（≤12字）, subtitle（≤20字）
-  示例：{"layout_type":"hero_text","title":"我們的核心承諾","subtitle":"以人為本，數據為輔","bullets":[],"visual_keywords":["vision"]}
+【quote_slide】bg=cardBg。"\u201C"fontSize:80,x:0.8,y:0.8。引文x:1.2,y:1.7,w:7.6,fontSize:24,italic,align:center。分隔線y:3.9。出處y:4.1,fontSize:14。
 
-conclusion  結論頁（全份只有1張，最後一頁）
-  必填：title, subtitle, bullets（3-4條要點，每條≤25字）
-  示例：{"layout_type":"conclusion","title":"結論與展望","subtitle":"感謝聆聽，歡迎交流","bullets":["要點一精煉","要點二精煉","要點三精煉"],"visual_keywords":["summary"]}
+【table】header:bold,color:FFFFFF,fill:accent,fontSize:13。交替行fill:cardBg/bg,fontSize:12。x:0.5,y:1.1,w:9。
 
-═══════════════════════════════════════
-【JSON 輸出格式】
-═══════════════════════════════════════
-{
-  "title": "簡報主標題（≤15字）",
-  "theme": "從以下選擇：tech-innovation / midnight-galaxy / ocean-depths / modern-minimalist / sunset-boulevard / forest-canopy / golden-hour / arctic-frost / desert-rose / botanical-garden",
-  "accent_color": "6碼hex不含#",
-  "slides": [12-16張投影片陣列]
-}
+【chart】BAR:x:0.8,y:1.2,w:8.4,h:3.8,barDir:"col",chartColors:[theme.accent],valGridLine:{color:theme.cardBg,size:0.5},catGridLine:{style:"none"},showValue:true,showLegend:false。
+PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
 
-theme 選擇依據：
-tech-innovation=科技AI軟體　midnight-galaxy=娛樂遊戲創意　ocean-depths=商業財務法律
-modern-minimalist=設計建築工業　sunset-boulevard=行銷生活旅遊　forest-canopy=環境健康永續
-golden-hour=文化歷史美食　arctic-frost=科學醫療研究　desert-rose=時尚精品美學　botanical-garden=教育生物科普
+【conclusion】標題fontSize:28。accent線w:2。一句總結italic,color:accent。3條要點用卡片y=1.9+i*1.0,h:0.75,fill:cardBg + FaCheck icon + 文字。
 
-所有版面的 bullets 欄位都必須存在（不用 bullets 的版面給空陣列 []）。
+═══ 規則 ═══
+- (x+w)≤9.7, (y+h)≤5.5。N卡片：totalW=N*cardW+(N-1)*gap≤9.3, startX=(10-totalW)/2
+- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
+- 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
+- 不連續兩頁同版面。一頁最多4卡片/5步驟。數字用big_number不用bullet
+
+═══ 輸出 ═══
+只輸出JS。從pres.defineLayout(...)開始。不加```或說明。不呼叫writeFile()。
+12-16頁。首頁cover末頁conclusion。≥5種版面。≥5頁用addIcon。
 """
 
 VIDEO_SCRIPT_PROMPT = """你是一位專業的影片旁白撰寫人。請根據以下文件內容，撰寫一段影片解說旁白腳本。
@@ -390,6 +393,18 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         raw = "".join(raw_parts).strip()
         raw = _strip_code_fence(raw)
 
+        if artifact_type == "slides":
+            # LLM returns PptxGenJS JavaScript code (not JSON).
+            # Store the code in content_text and execute it via Node.js runner.
+            update_studio_artifact(
+                artifact_id,
+                status="done",
+                content_json="{}",
+                content_text=raw,
+            )
+            asyncio.create_task(_generate_slides_pptx_bg(artifact_id, raw))
+            return
+
         data = json.loads(raw)
         content_text = _format_text(artifact_type, data)
 
@@ -400,11 +415,6 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             content_json=content_json_str,
             content_text=content_text,
         )
-
-        # For slides, kick off thumbnail generation in a separate task
-        # so the artifact status flips to "done" immediately.
-        if artifact_type == "slides":
-            asyncio.create_task(_generate_thumbnails_bg(artifact_id, content_json_str))
 
     except json.JSONDecodeError:
         # LLM output wasn't valid JSON — store raw text so user can still read it
@@ -423,10 +433,63 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         )
 
 
-async def _generate_thumbnails_bg(artifact_id: int, content_json: str) -> None:
-    """Run thumbnail generation in a thread (non-blocking background task)."""
+_THUMB_ROOT = Path("/data/thumbnails")
+
+
+async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
+    """
+    Background task for slides:
+      1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
+      2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
+      3. Convert .pptx → JPEG thumbnails (soffice → fitz)
+    """
+    from app.services.pptx_runner_service import execute_pptxgenjs
     from app.services.thumbnail_service import generate_thumbnails
-    try:
-        await asyncio.to_thread(generate_thumbnails, artifact_id, content_json)
-    except Exception:
-        logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pptx_tmp = str(Path(tmp) / "slides.pptx")
+        update_studio_artifact(artifact_id, progress_message="正在執行 PptxGenJS 生成簡報…")
+
+        success = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+        if not success:
+            logging.error("PptxGenJS execution failed for artifact %d", artifact_id)
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="PptxGenJS 執行失敗，請稍後重試。",
+            )
+            return
+
+        # Persist PPTX alongside thumbnails so it can be served as a static file
+        # at /thumbnails/{artifact_id}/slides.pptx
+        persistent_dir = _THUMB_ROOT / str(artifact_id)
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        pptx_path = persistent_dir / "slides.pptx"
+        shutil.copy2(pptx_tmp, pptx_path)
+
+        update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
+        try:
+            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+        except Exception:
+            logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+            return
+
+        # Optional: Vision QA — only runs when vision_model is configured
+        from app.routers.settings import _runtime_settings
+        from app.services.vision_qa import visual_qa_check
+        from app.services.thumbnail_service import get_thumbnail_urls
+
+        if _runtime_settings.vision_model:
+            thumb_urls = get_thumbnail_urls(artifact_id)
+            thumb_paths = [_THUMB_ROOT / str(artifact_id) / Path(u).name for u in thumb_urls]
+            update_studio_artifact(artifact_id, progress_message="正在進行視覺品質檢查…")
+            issues = await visual_qa_check(
+                thumb_paths,
+                api_base_url=_runtime_settings.llm_api_base_url,
+                api_key=_runtime_settings.llm_api_key,
+                model=_runtime_settings.vision_model,
+            )
+            problem_count = sum(len(s.get("issues", [])) for s in issues)
+            if problem_count > 0:
+                logging.warning("Vision QA found %d issue(s) in artifact %d: %s", problem_count, artifact_id, issues)
+                update_studio_artifact(artifact_id, progress_message=f"視覺 QA 發現 {problem_count} 個問題（詳見日誌）")

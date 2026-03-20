@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     llm_model: str = "nvidia/nemotron-3-nano-30b-a3b-fp8"
     embedding_model: str = "nvidia/nv-embed-v2"
     llm_max_tokens: int = 16384
+    vision_model: str = ""  # Optional: vision model for slide QA (empty = disabled)
 
     # ── Data paths ───────────────────────────────────────────
     upload_dir: str = os.getenv("UPLOAD_DIR", "/data/uploads")

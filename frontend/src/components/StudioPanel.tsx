@@ -10,7 +10,6 @@ import {
     ArtifactType,
     StudioArtifact,
     PodcastContent,
-    SlidesContent,
     MindMapContent,
     FlashcardsContent,
     QuizContent,
@@ -66,6 +65,11 @@ interface Props {
 function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact; onAskQuestion?: (q: string) => void }) {
     if (artifact.status !== "done") return null;
 
+    // Slides: LLM outputs PptxGenJS code stored in content_text; thumbnails served statically
+    if (artifact.artifact_type === "slides") {
+        return <SlidesViewer code={artifact.content_text} artifactId={artifact.id} />;
+    }
+
     if (artifact.artifact_type === "video_script" || artifact.artifact_type === "report") {
         // text-only types
         if (artifact.artifact_type === "report") {
@@ -79,16 +83,6 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
         switch (artifact.artifact_type) {
             case "podcast":
                 return <PodcastViewer data={data as PodcastContent} />;
-            case "slides": {
-                // Defensively normalise: LLM sometimes wraps slides under a nested key
-                const slidesData: SlidesContent = Array.isArray(data?.slides)
-                    ? data
-                    : data?.content ?? data;
-                if (!Array.isArray(slidesData?.slides)) {
-                    return <pre className="text-xs whitespace-pre-wrap text-gray-600">{artifact.content_json}</pre>;
-                }
-                return <SlidesViewer data={slidesData} artifactId={artifact.id} />;
-            }
             case "mindmap":
                 return <MindMapViewer data={data as MindMapContent} onAskQuestion={onAskQuestion} />;
             case "flashcards":

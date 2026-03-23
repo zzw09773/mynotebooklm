@@ -6,7 +6,8 @@ import { ProjectDashboardPage } from "../pages/ProjectDashboardPage";
 import { TEST_USER, loginViaApi, cleanupProjects } from "../fixtures/auth";
 
 const PROJECT_PREFIX = "E2E_Upload_";
-const FIXTURE_DIR = path.join(__dirname, "..", "fixtures", "files");
+// Use E2E_FIXTURE_DIR env var so this works even when the bundled fixtures/ dir is root-owned
+const FIXTURE_DIR = process.env.E2E_FIXTURE_DIR || path.join(__dirname, "..", "fixtures", "files");
 
 function createTestMarkdownFile(): string {
     fs.mkdirSync(FIXTURE_DIR, { recursive: true });

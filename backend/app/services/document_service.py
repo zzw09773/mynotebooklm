@@ -83,9 +83,9 @@ async def extract_text_from_pdf(file_path: str, vlm_config: dict | None = None) 
             if ocr_text:
                 text = ocr_text
 
-        # VLM semantic understanding — 150 DPI is sufficient for comprehension
+        # VLM semantic understanding — DPI configurable via VLM_DPI env var (default 96)
         if vlm_config:
-            pix = page.get_pixmap(dpi=150)
+            pix = page.get_pixmap(dpi=settings.vlm_dpi)
             img_bytes = pix.tobytes("jpeg")
             vlm_desc = await describe_image(
                 img_bytes,

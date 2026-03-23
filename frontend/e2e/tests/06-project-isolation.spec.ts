@@ -2,43 +2,10 @@ import { test, expect } from "@playwright/test";
 import { WorkspacePage } from "../pages/WorkspacePage";
 import { ProjectDashboardPage } from "../pages/ProjectDashboardPage";
 import { TEST_USER, loginViaApi, cleanupProjects } from "../fixtures/auth";
+import { getProjectIdByName, createConversationViaApi, addMessageViaApi } from "../fixtures/api";
 
 const PROJECT_A_PREFIX = "E2E_IsoA_";
 const PROJECT_B_PREFIX = "E2E_IsoB_";
-const BASE_URL = "http://172.16.120.35:3100";
-
-async function getProjectIdByName(token: string, name: string): Promise<number | null> {
-    const res = await fetch(`${BASE_URL}/api/projects`, {
-        headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const project = (data.projects || []).find((p: { id: number; name: string }) => p.name === name);
-    return project ? project.id : null;
-}
-
-async function createConvViaApi(token: string, projectId: number): Promise<{ id: number }> {
-    const res = await fetch(`${BASE_URL}/api/conversations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ project_id: projectId, title: "Test conv" }),
-    });
-    if (!res.ok) throw new Error(`Create conv failed: ${res.status}`);
-    return res.json();
-}
-
-async function addMsgViaApi(
-    token: string,
-    convId: number,
-    role: "user" | "assistant",
-    content: string,
-): Promise<void> {
-    await fetch(`${BASE_URL}/api/conversations/${convId}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ role, content }),
-    });
-}
 
 test.describe("Project Switching - Conversation Isolation", () => {
     let authToken: string;
@@ -120,7 +87,7 @@ test.describe("Project Switching - Conversation Isolation", () => {
         expect(projectAId).not.toBeNull();
 
         const convTitleA = "Restored Conv Alpha";
-        const convA = await createConvViaApi(authToken, projectAId!);
+        const convA = await createConversationViaApi(authToken, projectAId!, "Test conv");
 
         // Reload returns to the project dashboard — navigate back into Project A
         await page.reload();
@@ -219,8 +186,8 @@ test.describe("Project Switching - Conversation Isolation", () => {
         expect(projectAId).not.toBeNull();
 
         const msgA = "Message visible only in Project A";
-        const convA = await createConvViaApi(authToken, projectAId!);
-        await addMsgViaApi(authToken, convA.id, "user", msgA);
+        const convA = await createConversationViaApi(authToken, projectAId!, "Test conv");
+        await addMessageViaApi(authToken, convA.id, "user", msgA);
 
         // Reload returns to dashboard — navigate back into Project A
         await page.reload();

@@ -33,6 +33,8 @@ TARGET_ICONS = {
         "FaFlag", "FaHeart", "FaMoneyBillWave", "FaClipboardList",
         "FaSearchDollar", "FaBullseye", "FaProjectDiagram", "FaSitemap",
         "FaRegCalendarAlt", "FaUserTie", "FaBriefcase",
+        "FaGavel", "FaSearch", "FaBook", "FaFileAlt", "FaChartBar",
+        "FaMapMarkerAlt", "FaPhone", "FaEnvelope", "FaCalendar", "FaFilter",
     ],
     "md": [
         "MdDashboard", "MdAnalytics", "MdSecurity", "MdSpeed",

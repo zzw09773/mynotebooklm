@@ -6,7 +6,7 @@ import { ProjectDashboardPage } from "../pages/ProjectDashboardPage";
 import { TEST_USER, loginViaApi, cleanupProjects } from "../fixtures/auth";
 
 const PROJECT_PREFIX = "E2E_Chat_";
-const FIXTURE_DIR = path.join(__dirname, "..", "fixtures", "files");
+const FIXTURE_DIR = process.env.E2E_FIXTURE_DIR || path.join(__dirname, "..", "fixtures", "files");
 
 function ensureTestMdFile(): string {
     fs.mkdirSync(FIXTURE_DIR, { recursive: true });
@@ -89,9 +89,9 @@ test.describe("Chat Q&A with Project", () => {
         // An assistant response container should appear (even if empty initially during streaming)
         await expect(page.locator("text=Please introduce yourself")).toBeVisible({ timeout: 10000 });
 
-        // Wait for assistant response to appear
-        // The response should not be empty after streaming completes
-        await page.waitForTimeout(5000); // Wait for some streaming content
+        // Wait for the assistant response element to appear in the chat area
+        await expect(page.locator("main [data-role='assistant'], main .assistant-message").first())
+            .toBeVisible({ timeout: 15000 });
     });
 
     test("multiple messages create a conversation history", async ({ page }) => {
@@ -100,15 +100,17 @@ test.describe("Chat Q&A with Project", () => {
 
         const textarea = page.locator("textarea").first();
 
-        // First message
+        // First message — wait for user message to render before sending the next
         await textarea.fill("First question: what is testing?");
         await textarea.press("Enter");
-        await page.waitForTimeout(3000);
+        await expect(page.locator("main").getByText("First question: what is testing?").first())
+            .toBeVisible({ timeout: 10000 });
 
         // Second message
         await textarea.fill("Second question: what tools are available?");
         await textarea.press("Enter");
-        await page.waitForTimeout(3000);
+        await expect(page.locator("main").getByText("Second question: what tools are available?").first())
+            .toBeVisible({ timeout: 10000 });
 
         // Both user messages should appear in the chat area (main), not in the sidebar
         await expect(page.locator("main").getByText("First question: what is testing?").first()).toBeVisible({ timeout: 10000 });

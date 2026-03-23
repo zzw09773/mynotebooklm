@@ -44,7 +44,7 @@ SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 PptxGe
 ═══ 環境 ═══
 `pres`已建立。`addIcon(sld,name,colorHex,x,y,w,h)`可用。畫布10"×5.625"。
 禁用require/import/writeFile/fs/process/module/exports。
-Icon: FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp FaExchangeAlt FaBalanceScale FaHandshake FaTrophy FaFlag FaHeart FaMoneyBillWave FaClipboardList FaSearchDollar FaBullseye FaProjectDiagram FaSitemap FaRegCalendarAlt FaUserTie FaBriefcase MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights MdTrendingUp MdCompareArrows MdTimeline MdAssessment
+Icon: FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp FaExchangeAlt FaBalanceScale FaHandshake FaTrophy FaFlag FaHeart FaMoneyBillWave FaClipboardList FaSearchDollar FaBullseye FaProjectDiagram FaSitemap FaRegCalendarAlt FaUserTie FaBriefcase FaGavel FaSearch FaBook FaFileAlt FaChartBar FaMapMarkerAlt FaPhone FaEnvelope FaCalendar FaFilter MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights MdTrendingUp MdCompareArrows MdTimeline MdAssessment
 
 ═══ 步驟一：敘事弧線 ═══
 匯報型:背景→發現→數據→啟示→結論 | 提案型:痛點→方案→可行性→佐證→行動
@@ -138,6 +138,7 @@ PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
 - 每個變數名只宣告一次，不同投影片請用不同名稱（如 items1/items2，cx1/cx2）
 - 程式碼結尾只到最後一個 JS 語句（};），不加 ---、//、說明文字
 - 禁止使用 ShapeType.circle（請用 ShapeType.ellipse）
+- addShape 只使用 ShapeType.rect 或 ShapeType.ellipse；畫線請用 addShape(pres.ShapeType.rect,{w:長度,h:0.04,...}) 模擬
 - 禁止使用 let/const（已由 runner 轉換，但直接用 var 更安全）
 
 ═══ 輸出 ═══
@@ -367,6 +368,14 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             )
             return
 
+        if artifact_type not in ARTIFACT_PROMPTS:
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message=f"不支援的 artifact 類型：{artifact_type}",
+            )
+            return
+
         combined = "\n\n".join(parts)
         if len(combined) > _MAX_TOTAL_CHARS:
             combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
@@ -400,6 +409,14 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         raw = "".join(raw_parts).strip()
         raw = _strip_code_fence(raw)
 
+        if not raw:
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="AI 未產生任何內容，可能模型暫時無法回應，請稍後重試。",
+            )
+            return
+
         if artifact_type == "slides":
             # LLM returns PptxGenJS JavaScript code (not JSON).
             # Save code but keep status="generating" so the frontend keeps polling.
@@ -425,12 +442,13 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         )
 
     except json.JSONDecodeError:
-        # LLM output wasn't valid JSON — store raw text so user can still read it
+        # LLM output wasn't valid JSON — store raw text for debugging
         update_studio_artifact(
             artifact_id,
-            status="done",
+            status="error",
             content_json="{}",
             content_text=raw,
+            error_message="AI 回應格式有誤，無法解析內容，請稍後重試。",
         )
     except Exception:
         logging.exception("Studio artifact generation failed: project=%s type=%s", project_id, artifact_type)

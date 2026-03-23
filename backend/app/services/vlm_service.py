@@ -55,7 +55,7 @@ async def describe_image(
     ]
 
     try:
-        async with httpx.AsyncClient(verify=False, timeout=60) as client:
+        async with httpx.AsyncClient(verify=False, timeout=120.0) as client:
             resp = await client.post(
                 f"{api_base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -72,6 +72,6 @@ async def describe_image(
             return ""
         return text
 
-    except Exception:
-        log.exception("vlm_service: describe_image failed (non-fatal)")
+    except Exception as exc:
+        log.warning("vlm_service: describe_image failed (non-fatal): %s", type(exc).__name__)
         return ""

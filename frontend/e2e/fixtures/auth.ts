@@ -1,16 +1,15 @@
 import { Page } from "@playwright/test";
 
-const BASE_URL = "http://172.16.120.35:3100";
-const API_URL = "http://172.16.120.35:8100";
+export const BASE_URL = process.env.BASE_URL || "http://localhost:3100";
 
 export const TEST_USER = {
-    username: "e2etest01",
-    password: "testpass01",
+    username: process.env.E2E_USER || "e2etest01",
+    password: process.env.E2E_PASSWORD ?? "testpass01",
 };
 
 export const TEST_USER_B = {
-    username: "e2etest02",
-    password: "testpass02",
+    username: process.env.E2E_USER_B || "e2etest02",
+    password: process.env.E2E_PASSWORD_B ?? "testpass02",
 };
 
 /**

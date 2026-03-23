@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const CHROMIUM_PATH = process.env.CHROMIUM_PATH ?? undefined;
+
 export default defineConfig({
     testDir: "./e2e/tests",
     fullyParallel: false,
@@ -12,18 +14,12 @@ export default defineConfig({
         ["list"],
     ],
     use: {
-        baseURL: "http://172.16.120.35:3100",
-        trace: "off",
+        baseURL: process.env.BASE_URL || "http://localhost:3100",
+        trace: "on-first-retry",
         screenshot: "only-on-failure",
         video: "off",
         actionTimeout: 15000,
         navigationTimeout: 30000,
-        // Use system Chromium on Alpine Linux inside Docker
-        channel: undefined,
-        launchOptions: {
-            executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
-            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-        },
     },
     outputDir: "e2e/artifacts",
     projects: [
@@ -32,7 +28,7 @@ export default defineConfig({
             use: {
                 ...devices["Desktop Chrome"],
                 launchOptions: {
-                    executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
+                    ...(CHROMIUM_PATH ? { executablePath: CHROMIUM_PATH } : {}),
                     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
                 },
             },

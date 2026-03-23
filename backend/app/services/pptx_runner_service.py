@@ -30,6 +30,16 @@ class RunResult(str, Enum):
     TIMEOUT = "timeout"             # process killed due to timeout
 
 
+# Default preamble injected when the LLM omits it (tech-innovation theme).
+# This prevents "theme is not defined" / "FONT is not defined" runtime errors.
+_DEFAULT_PREAMBLE = """\
+pres.defineLayout({name:"16x9",width:10,height:5.625});
+pres.layout="16x9";
+var theme={bg:"1E1E1E",accent:"0066FF",title:"FFFFFF",text:"CCCCCC",muted:"888888",cardBg:"2A2A2A"};
+var FONT="Microsoft JhengHei";
+"""
+
+
 def _preprocess_code(code: str) -> str:
     """
     Fix common LLM code-generation mistakes before passing to Node.js runner.
@@ -46,6 +56,23 @@ def _preprocess_code(code: str) -> str:
     ):
         lines.pop()
     code = "\n".join(lines)
+
+    # Inject preamble if LLM forgot to define theme/FONT/layout.
+    # The check is simple: if neither "var theme" nor "const theme" appears in
+    # the code, the LLM skipped the preamble and "theme is not defined" would
+    # occur at runtime.  Prepending the default preamble fixes this without
+    # touching any slide content.
+    if "theme" not in code:
+        log.warning("LLM output missing 'theme' definition — injecting default preamble")
+        code = _DEFAULT_PREAMBLE + code
+    elif not code.lstrip().startswith("pres.defineLayout"):
+        # theme is defined somewhere but defineLayout is missing at the top
+        if "pres.defineLayout" not in code:
+            log.warning("LLM output missing pres.defineLayout — injecting layout header")
+            code = (
+                'pres.defineLayout({name:"16x9",width:10,height:5.625});\npres.layout="16x9";\n'
+                + code
+            )
 
     # Note: automatic quote-mismatch repair ("value' → "value") is intentionally
     # NOT done here — the regex cannot safely distinguish mismatched quotes from

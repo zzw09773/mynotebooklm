@@ -13,7 +13,7 @@ from pathlib import Path
 
 from llama_index.core.llms import ChatMessage, MessageRole
 
-from app.services.llm_service import get_llm
+from app.services.llm_service import get_llm, _fresh_async_client
 from app.services.summary_service import _collect_document_text
 from app.models import (
     list_project_documents,
@@ -74,8 +74,13 @@ desert-rose(時尚精品):E8D5C4/B87D6D/5D2E46/5D2E46/D4A5A5/F0E4D8
 ═══ 固定開頭 ═══
 pres.defineLayout({name:"16x9",width:10,height:5.625});
 pres.layout="16x9";
-const theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
-const FONT="Microsoft JhengHei";
+var theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
+var FONT="Microsoft JhengHei";
+
+═══ 每張投影片（必須）═══
+var sld = pres.addSlide({bkgd:theme.bg});
+// 接著用 sld.addText / sld.addShape / addIcon(sld,...) 排版
+// 每張新投影片都要重新 var sld = pres.addSlide({bkgd:theme.bg});
 
 ═══ 共用標題（cover/section_divider/quote_slide除外）═══
 sld.addShape(pres.ShapeType.rect,{x:0,y:0,w:10,h:0.06,fill:{color:theme.accent}});
@@ -88,7 +93,7 @@ sld.addText("標題",{x:0.5,y:0.2,w:9,h:0.6,fontSize:24,color:theme.title,fontFa
 【section_divider】bg=accent。"SECTION 0N"x:0.6,y:1.2,fontSize:14,color:bg,charSpacing:4。標題x:0.6,y:1.8,fontSize:36,color:FFFFFF。描述x:0.6,y:3.3。
 
 【big_number — 多數字並排（關鍵範例）】
-const stats=[{num:"16",unit:"分鐘",label:"出場時間"},{num:"8.2",unit:"分",label:"場均得分"},{num:"+3",unit:"",label:"正負值"}];
+const stats=[{num:"N1",unit:"單位1",label:"指標一"},{num:"N2",unit:"單位2",label:"指標二"},{num:"N3",unit:"單位3",label:"指標三"}];
 const cardW=2.7,gap=0.45,startX=(10-(stats.length*cardW+(stats.length-1)*gap))/2;
 stats.forEach((s,i)=>{
   const cx=startX+i*(cardW+gap);
@@ -129,11 +134,12 @@ PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
 
 ═══ 規則 ═══
 - (x+w)≤9.7, (y+h)≤5.5。N卡片：totalW=N*cardW+(N-1)*gap≤9.3, startX=(10-totalW)/2
-- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
+- 只用文件真實數據，禁止編造數字/引言。範例中的佔位符（N1、指標一等）必須替換為文件內容。全部繁體中文不混簡體
 - 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
 - 不連續兩頁同版面。一頁最多4卡片/5步驟。數字用big_number不用bullet
 
 ═══ 程式碼規則（違反會造成執行錯誤）═══
+- 每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg})，再用 sld 排版
 - 所有字串用雙引號（"），禁用單引號（'）
 - 每個變數名只宣告一次，不同投影片請用不同名稱（如 items1/items2，cx1/cx2）
 - 程式碼結尾只到最後一個 JS 語句（};），不加 ---、//、說明文字
@@ -142,7 +148,7 @@ PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
 - 禁止使用 let/const（已由 runner 轉換，但直接用 var 更安全）
 
 ═══ 輸出 ═══
-只輸出JS。從pres.defineLayout(...)開始。不加```或說明。不呼叫writeFile()。
+只輸出JS。第一行必須是 pres.defineLayout(...)，第二行是 pres.layout="16x9"，第三行是 var theme={...}，第四行是 var FONT="Microsoft JhengHei"。缺少這四行會造成執行錯誤。不加```或說明。不呼叫writeFile()。
 12-16頁。首頁cover末頁conclusion。≥5種版面。≥5頁用addIcon。
 """
 
@@ -307,6 +313,7 @@ _TEXT_ONLY_TYPES = {"video_script", "report"}
 _MAX_PER_DOC_CHARS = 8000
 _MAX_TOTAL_CHARS = 20000
 _PROGRESS_UPDATE_EVERY = 500  # chars between DB progress updates
+_STREAM_TIMEOUT_SECS = 300    # max seconds to wait for LLM streaming (including first-token latency)
 
 
 def _strip_code_fence(raw: str) -> str:
@@ -383,7 +390,11 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         prompt = ARTIFACT_PROMPTS[artifact_type]
         user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
 
-        llm = get_llm()
+        # Use a fresh AsyncClient per generation to avoid stale connection
+        # pool state after asyncio cancellation (previous timeout can corrupt
+        # the shared pool, causing the next streaming request to receive 0 bytes).
+        _stream_client = _fresh_async_client()
+        llm = get_llm(async_client=_stream_client)
         messages = [
             ChatMessage(role=MessageRole.SYSTEM, content=prompt),
             ChatMessage(role=MessageRole.USER, content=user_msg),
@@ -391,21 +402,40 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 
         update_studio_artifact(artifact_id, progress_message="AI 正在生成內容，請耐心等候…")
 
-        # Use streaming to avoid httpx.ReadTimeout on long JSON responses
-        # (non-streaming waits for the full response before the first byte arrives)
+        # Use streaming to avoid httpx.ReadTimeout on long JSON responses.
+        # Wrap with asyncio.timeout so a completely unresponsive model
+        # doesn't hang the task forever (the model can take ~70s before
+        # the first token for complex prompts like SLIDES_PROMPT).
         raw_parts: list[str] = []
         total_chars = 0
         last_progress_chars = 0
-        async for chunk in await llm.astream_chat(messages):
-            if chunk.delta:
-                raw_parts.append(chunk.delta)
-                total_chars += len(chunk.delta)
-                if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
-                    last_progress_chars = total_chars
-                    update_studio_artifact(
-                        artifact_id,
-                        progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
-                    )
+        try:
+            async with asyncio.timeout(_STREAM_TIMEOUT_SECS):
+                async for chunk in await llm.astream_chat(messages):
+                    if chunk.delta:
+                        raw_parts.append(chunk.delta)
+                        total_chars += len(chunk.delta)
+                        if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
+                            last_progress_chars = total_chars
+                            update_studio_artifact(
+                                artifact_id,
+                                progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
+                            )
+        except TimeoutError:
+            logging.warning(
+                "LLM streaming timed out after %ds for artifact %d (got %d chars)",
+                _STREAM_TIMEOUT_SECS, artifact_id, total_chars,
+            )
+            if not raw_parts:
+                update_studio_artifact(
+                    artifact_id,
+                    status="error",
+                    error_message=f"AI 回應逾時（{_STREAM_TIMEOUT_SECS} 秒內未產生內容），請稍後重試。",
+                )
+                return
+            # Got partial content — try to use what we have
+        finally:
+            await _stream_client.aclose()
         raw = "".join(raw_parts).strip()
         raw = _strip_code_fence(raw)
 
@@ -462,19 +492,21 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 _THUMB_ROOT = Path("/data/thumbnails")
 
 
-async def _fix_pptxgenjs_syntax(code: str, error_msg: str) -> str:
+async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:
     """
-    Ask the LLM to fix a syntax error in PptxGenJS code.
+    Ask the LLM to fix an error in PptxGenJS code.
     Returns the corrected code, or the original code if the fix attempt fails.
     """
-    llm = get_llm()
     fix_prompt = (
-        "以下 PptxGenJS 程式碼有語法錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
+        "以下 PptxGenJS 程式碼執行時發生錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
         "不加任何說明或 markdown 標記。\n\n"
+        "重要提醒：每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg}) 才能使用 sld。\n\n"
         f"錯誤訊息：{error_msg}\n\n"
         f"程式碼：\n{code}"
     )
     messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
+    fix_client = _fresh_async_client()
+    llm = get_llm(async_client=fix_client)
     try:
         parts: list[str] = []
         async for chunk in await llm.astream_chat(messages):
@@ -484,15 +516,17 @@ async def _fix_pptxgenjs_syntax(code: str, error_msg: str) -> str:
         fixed = _strip_code_fence(fixed)
         return fixed if fixed else code
     except Exception:
-        logging.exception("Syntax fix LLM call failed for artifact — using original code")
+        logging.exception("Code fix LLM call failed for artifact — using original code")
         return code
+    finally:
+        await fix_client.aclose()
 
 
 async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
     """
     Background task for slides:
       1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
-         On SyntaxError: ask LLM to fix and retry once.
+         On SyntaxError or RuntimeError: ask LLM to fix and retry once.
       2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
       3. Convert .pptx → JPEG thumbnails (soffice → fitz)
     """
@@ -505,11 +539,11 @@ async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> Non
 
         result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
 
-        # On syntax error: ask LLM to fix then retry once
-        if result == RunResult.SYNTAX_ERROR:
-            logging.warning("PptxGenJS syntax error for artifact %d — asking LLM to fix", artifact_id)
-            update_studio_artifact(artifact_id, progress_message="偵測到語法錯誤，正在要求 AI 修正…")
-            pptxgenjs_code = await _fix_pptxgenjs_syntax(pptxgenjs_code, stderr)
+        # On syntax or runtime error: ask LLM to fix then retry once
+        if result in (RunResult.SYNTAX_ERROR, RunResult.RUNTIME_ERROR):
+            logging.warning("PptxGenJS %s for artifact %d — asking LLM to fix", result.value, artifact_id)
+            update_studio_artifact(artifact_id, progress_message="偵測到執行錯誤，正在要求 AI 修正…")
+            pptxgenjs_code = await _fix_pptxgenjs_code(pptxgenjs_code, stderr)
             update_studio_artifact(artifact_id, progress_message="重新執行修正後的程式碼…")
             # Remove stale output file from first attempt before retry
             Path(pptx_tmp).unlink(missing_ok=True)

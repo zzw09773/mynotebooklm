@@ -3,7 +3,9 @@ Project database models using SQLModel (SQLite).
 """
 import logging
 import os
+import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from sqlmodel import SQLModel, Field, Session, create_engine, select
@@ -59,6 +61,10 @@ def init_db():
     SQLModel.metadata.create_all(_engine)
     # Migrate: add new columns to existing tables
     _run_migrations()
+    # Reset orphaned 'generating' artifacts from previous server runs
+    _reset_orphaned_artifacts()
+    # Remove thumbnail dirs for artifacts that no longer exist
+    _cleanup_orphaned_thumbnails()
 
 def _run_migrations():
     """Add new columns to existing tables if they don't exist."""
@@ -93,6 +99,46 @@ def _run_migrations():
         logging.warning("Migration warning: %s", e)
     finally:
         conn.close()
+
+
+def _reset_orphaned_artifacts():
+    """Reset artifacts stuck in 'generating' from a previous server run."""
+    import sqlite3
+    conn = sqlite3.connect(_DB_PATH)
+    try:
+        cur = conn.execute(
+            "UPDATE studioartifact SET status='pending', progress_message=''"
+            " WHERE status='generating'"
+        )
+        if cur.rowcount:
+            logging.warning("Reset %d orphaned 'generating' artifact(s) to 'pending'", cur.rowcount)
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # table may not exist yet
+    finally:
+        conn.close()
+
+
+def _cleanup_orphaned_thumbnails():
+    """Remove thumbnail dirs for artifacts that no longer exist in DB."""
+    import sqlite3
+    thumb_root = Path("/data/thumbnails")
+    if not thumb_root.exists():
+        return
+    conn = sqlite3.connect(_DB_PATH)
+    try:
+        existing_ids = {
+            str(r[0])
+            for r in conn.execute("SELECT id FROM studioartifact").fetchall()
+        }
+    except sqlite3.OperationalError:
+        return  # table may not exist yet
+    finally:
+        conn.close()
+    for d in thumb_root.iterdir():
+        if d.is_dir() and d.name not in existing_ids:
+            shutil.rmtree(d)
+            logging.warning("Removed orphaned thumbnail dir: %s", d)
 
 
 # ── Persisted settings (survive restarts) ─────────────────────
@@ -211,10 +257,11 @@ def delete_project(project_id: int) -> bool:
         ).all()
         for s in summaries:
             session.delete(s)
-        # Delete studio artifacts
+        # Delete studio artifacts and collect IDs for thumbnail cleanup
         artifacts = session.exec(
             select(StudioArtifact).where(StudioArtifact.project_id == project_id)
         ).all()
+        artifact_ids = [a.id for a in artifacts]
         for a in artifacts:
             session.delete(a)
         # Delete conversations and their messages
@@ -230,6 +277,14 @@ def delete_project(project_id: int) -> bool:
             session.delete(conv)
         session.delete(project)
         session.commit()
+
+    # Clean up studio artifact thumbnails and PPTX files on disk
+    _THUMBNAILS_DIR = Path("/data/thumbnails")
+    for aid in artifact_ids:
+        thumb_dir = _THUMBNAILS_DIR / str(aid)
+        if thumb_dir.exists():
+            shutil.rmtree(thumb_dir)
+            logging.info("Deleted thumbnail dir: %s", thumb_dir)
 
     # Clean up ChromaDB collections and uploaded files outside session
     from app.services.document_service import delete_document

@@ -7,10 +7,13 @@ Generates 9 types of AI content from a project's documents:
 import asyncio
 import json
 import logging
+import shutil
+import tempfile
+from pathlib import Path
 
 from llama_index.core.llms import ChatMessage, MessageRole
 
-from app.services.llm_service import get_llm
+from app.services.llm_service import get_llm, _fresh_async_client
 from app.services.summary_service import _collect_document_text
 from app.models import (
     list_project_documents,
@@ -36,103 +39,61 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
 5. 輸出必須是合法的 JSON。
 """
 
-SLIDES_PROMPT = """你是一位專業的簡報設計師。請根據以下文件內容，產生一份視覺多元的簡報 JSON。
+SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 PptxGenJS 程式碼。
 
-═══════════════════════════════════════
-【絕對禁止——違反以下任何一條即為錯誤】
-═══════════════════════════════════════
-1. conclusion 只能出現 1 次，必須是最後一張。禁止在中間章節放 conclusion。
-2. cover 只能出現 1 次，必須是第一張。
-3. 禁止重複結構：不可把簡報分成「兩個各自完整的弧線」——整份只有一個開頭和一個結尾。
-4. hero_text 最多 1 張。section 最多 3 張。quote 最多 1 張。
-5. content 版面不超過總頁數的 25%（例如 14 頁簡報最多 3 頁 content）。
-6. 每條 bullet 不超過 25 個中文字。title 不超過 15 個中文字。subtitle 不超過 20 個中文字。
+環境：pres已建立。addIcon(sld,name,colorHex,x,y,w,h)可用。畫布10"×5.625"。禁用require/import/writeFile/fs/process/module/exports。
+Icon可用：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog MdDashboard MdAnalytics MdSecurity MdTrendingUp
 
-═══════════════════════════════════════
-【基本要求】
-═══════════════════════════════════════
-- 總頁數：12-16 張（含封面和結論）
-- 至少使用 6 種不同的 layout_type
-- 使用繁體中文（icon 名稱和 visual_keywords 用英文）
-- 輸出純 JSON，不加 markdown 標記
+敘事弧線（擇一）：匯報:背景→發現→數據→啟示→結論 | 提案:痛點→方案→佐證→行動 | 分析:定義→拆解→利弊→建議 | 教學:重要性→概念→步驟→回顧
 
-═══════════════════════════════════════
-【敘事結構】先判斷文件類型：
-═══════════════════════════════════════
-- 匯報型：背景 → 行動/方法 → 成果數據 → 結論
-- 提案型：問題/機會 → 解決方案 → 執行計畫 → 行動呼籲
-- 教學型：概念 → 原理 → 步驟 → 應用
-- 分析型：背景 → 發現 → 洞察 → 建議
+版面選擇（相鄰不重複，≥5種）：
+1-3個數字→big_number | 比較→dual_column | 3-4並列→card_grid | 步驟→process_flow | 數據→table | 趨勢佔比→chart | 金句→quote_slide | 章節→section_divider | 其餘→content_with_icon
 
-═══════════════════════════════════════
-【12 種版面格式】（每張必須指定 layout_type）
-═══════════════════════════════════════
+色票 bg/accent/title/text/muted/cardBg（根據主題選一）：
+tech:1E1E1E/0066FF/FFFFFF/CCCCCC/888888/2A2A2A
+ocean:1A2332/2D8B8B/F1FAEE/A8DADC/5A8A8A/243040
+golden:4A403A/F4A900/D4B896/D4B896/C1666B/5A4E47
+frost:FAFAFA/4A6FA5/1A2332/334155/909090/D4E4F7
+garden:F5F3ED/4A7C59/333333/555555/B7472A/EBE9E1
+sports:1B1F3B/E63946/FFFFFF/D0D0D0/6C7A96/252A4A
 
-cover    第一張封面
-  必填：title, subtitle
-  示例：{"layout_type":"cover","title":"AI治理實務","subtitle":"ISO 42001 導入報告","bullets":[],"visual_keywords":["governance"]}
+固定開頭（必須完整輸出前4行）：
+pres.defineLayout({name:"16x9",width:10,height:5.625});
+pres.layout="16x9";
+var theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
+var FONT="Microsoft JhengHei";
 
-section  章節分隔（最多3張）
-  必填：title  可選：subtitle
-  示例：{"layout_type":"section","title":"導入背景與挑戰","bullets":[],"visual_keywords":["context"]}
+每張投影片：var sld=pres.addSlide({bkgd:theme.bg}); 再排版。每張都要重新宣告sld。
+共用標題（cover/section_divider/quote_slide除外）：accent頂條h:0.06 + addText標題x:0.5,y:0.2,w:9,h:0.6,fontSize:24,bold。
 
-content  一般說明（最多佔25%）
-  必填：title, bullets（3-4條，每條≤25字）
-  示例：{"layout_type":"content","title":"核心架構說明","bullets":["第一條要點，精煉","第二條要點，精煉"],"visual_keywords":["structure"]}
+版面說明：
+【cover】accent頂條+左裝飾線x:0.5,y:1.5,w:0.07,h:2.4+主標x:0.85,y:1.5,fontSize:40+副標y:2.85,fontSize:18,color:muted+右下色塊x:8.8,y:4.6,w:1,h:0.8
+【section_divider】bg=accent。小標y:1.2,fontSize:14,color:bg,charSpacing:4。主標y:1.8,fontSize:36,color:FFFFFF。描述y:3.3。
+【big_number】多指標：N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+大數字fontSize:52,color:accent+單位fontSize:14+標籤fontSize:13。單一大數字：fontSize:100,x:0.5,y:1.4,w:9,h:2.2,align:center。
+【dual_column】左卡x:0.4,y:1.15,w:4.35,h:3.6,fill:cardBg+accent頂條+icon+標題fontSize:18+要點fontSize:13。中間"VS"。右卡x:5.25結構同左。
+【card_grid】N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+addIcon(0.45尺寸)+標題fontSize:16+說明fontSize:12。
+【process_flow】accent圓形(r=0.35)水平排列+連接線y:1.85+編號fontSize:16+標題y:2.5,fontSize:14+說明y:2.95,fontSize:11。
+【content_with_icon】左icon x:0.5,y:1.4,w:0.9+垂直線x:1.7,h:3.2+右側x:2.0,w:7.5交替標題fontSize:16+說明fontSize:13。
+【quote_slide】bg=cardBg。"\u201C"fontSize:80。引文x:1.2,y:1.7,w:7.6,fontSize:24,italic,align:center。分隔線y:3.9。出處fontSize:14。
+【table】header bold,fill:accent,fontSize:13。交替行fill:cardBg/bg,fontSize:12。x:0.5,y:1.1,w:9。
+【chart】BAR:x:0.8,y:1.2,w:8.4,h:3.8,barDir:"col",chartColors:[theme.accent],showValue:true。PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
+【conclusion】標題fontSize:28+accent線w:2+一句總結italic,color:accent+3條要點卡片y=1.9+i*1.0,h:0.75,fill:cardBg+FaCheck icon。
 
-big_number  大數字指標（展示單一 KPI）
-  必填：metric, label  可選：unit, title, bullets（1條補充說明）
-  示例：{"layout_type":"big_number","title":"關鍵成效","metric":"87","unit":"%","label":"合規達成率","bullets":["相較去年提升 12%"],"visual_keywords":["kpi"]}
+規則：
+- (x+w)≤9.7,(y+h)≤5.5。N卡片：totalW=N*2.7+(N-1)*0.45≤9.3，startX=(10-totalW)/2
+- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
+- 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
+- 不連續兩頁同版面。一頁最多4卡片/5步驟。有數字用big_number不用bullet
 
-dual_card  左右對比（比較/Before-After）
-  必填：title, left_card{title,bullets}, right_card{title,bullets}
-  示例：{"layout_type":"dual_card","title":"導入前後對比","left_card":{"title":"導入前","bullets":["人工審查","回應慢"]},"right_card":{"title":"導入後","bullets":["自動化","即時回應"]},"bullets":[],"visual_keywords":["comparison"]}
+程式碼規則（違反會執行錯誤）：
+- 每張投影片先var sld=pres.addSlide({bkgd:theme.bg})
+- 所有字串用雙引號，禁用單引號
+- 每個變數只宣告一次，不同投影片用不同名（stats1/stats2，cx1/cx2）
+- 程式碼結尾只到最後一個};，不加---或說明文字
+- 禁用ShapeType.circle（改用ellipse）。addShape只用rect或ellipse
+- 用var，不用let/const
 
-multi_card  多格卡片（3-4個並列）
-  必填：title, cards（每張必填 icon + title + description）
-  icon 從以下選擇：FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights
-  示例：{"layout_type":"multi_card","title":"四大核心模組","cards":[{"icon":"FaShieldAlt","title":"風險管控","description":"識別並降低AI風險"},{"icon":"FaChartLine","title":"績效追蹤","description":"量化成效指標"}],"bullets":[],"visual_keywords":["modules"]}
-
-stats  數字統計卡（2-4個數字）
-  必填：title, bullets（格式：「數字：說明」，每條≤15字）
-  示例：{"layout_type":"stats","title":"成果數字","bullets":["98%：系統可用率","1,200：新增用戶","3.2x：效能提升"],"visual_keywords":["metrics"]}
-
-table  表格對比（規格/時程/數據）
-  必填：title, headers（陣列）, rows（2D陣列，每格≤10字）
-  示例：{"layout_type":"table","title":"方案比較","headers":["項目","方案A","方案B"],"rows":[["成本","低","高"],["功能","基本","完整"]],"bullets":[],"visual_keywords":["comparison"]}
-
-flow  流程圖（3-5個步驟）
-  必填：title, steps（每步：label≤8字，description≤15字）
-  示例：{"layout_type":"flow","title":"實施四步驟","steps":[{"label":"需求分析","description":"蒐集利害關係人意見"},{"label":"設計規劃","description":"制定治理框架"}],"bullets":[],"visual_keywords":["process"]}
-
-quote  引言（最多1張）
-  必填：title, bullets[0]（引言內容，≤40字）  可選：subtitle（來源）
-  示例：{"layout_type":"quote","title":"核心洞見","subtitle":"— ISO 42001:2023","bullets":["AI治理的本質是讓技術為人服務，而非反之"],"visual_keywords":["insight"]}
-
-hero_text  全版大字轉場（最多1張）
-  必填：title（≤12字）, subtitle（≤20字）
-  示例：{"layout_type":"hero_text","title":"我們的核心承諾","subtitle":"以人為本，數據為輔","bullets":[],"visual_keywords":["vision"]}
-
-conclusion  結論頁（全份只有1張，最後一頁）
-  必填：title, subtitle, bullets（3-4條要點，每條≤25字）
-  示例：{"layout_type":"conclusion","title":"結論與展望","subtitle":"感謝聆聽，歡迎交流","bullets":["要點一精煉","要點二精煉","要點三精煉"],"visual_keywords":["summary"]}
-
-═══════════════════════════════════════
-【JSON 輸出格式】
-═══════════════════════════════════════
-{
-  "title": "簡報主標題（≤15字）",
-  "theme": "從以下選擇：tech-innovation / midnight-galaxy / ocean-depths / modern-minimalist / sunset-boulevard / forest-canopy / golden-hour / arctic-frost / desert-rose / botanical-garden",
-  "accent_color": "6碼hex不含#",
-  "slides": [12-16張投影片陣列]
-}
-
-theme 選擇依據：
-tech-innovation=科技AI軟體　midnight-galaxy=娛樂遊戲創意　ocean-depths=商業財務法律
-modern-minimalist=設計建築工業　sunset-boulevard=行銷生活旅遊　forest-canopy=環境健康永續
-golden-hour=文化歷史美食　arctic-frost=科學醫療研究　desert-rose=時尚精品美學　botanical-garden=教育生物科普
-
-所有版面的 bullets 欄位都必須存在（不用 bullets 的版面給空陣列 []）。
+輸出：只輸出JS，不加```。前4行必須是defineLayout/layout/theme/FONT。不呼叫writeFile()。8-12頁，首頁cover末頁conclusion，≥4種版面，≥4頁用addIcon。
 """
 
 VIDEO_SCRIPT_PROMPT = """你是一位專業的影片旁白撰寫人。請根據以下文件內容，撰寫一段影片解說旁白腳本。
@@ -295,7 +256,11 @@ _TEXT_ONLY_TYPES = {"video_script", "report"}
 
 _MAX_PER_DOC_CHARS = 8000
 _MAX_TOTAL_CHARS = 20000
+_SLIDES_MAX_PER_DOC_CHARS = 6000   # enough material per doc for 8-12 slides
+_SLIDES_MAX_TOTAL_CHARS = 15000    # allow richer context so LLM can fill 8-12 pages
 _PROGRESS_UPDATE_EVERY = 500  # chars between DB progress updates
+_STREAM_TIMEOUT_SECS = 300    # max seconds to wait for LLM streaming (including first-token latency)
+_STREAM_MAX_RETRIES = 2       # retry attempts when streaming returns 0 chars (server busy)
 
 
 def _strip_code_fence(raw: str) -> str:
@@ -357,14 +322,46 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             )
             return
 
-        combined = "\n\n".join(parts)
-        if len(combined) > _MAX_TOTAL_CHARS:
-            combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
+        if artifact_type not in ARTIFACT_PROMPTS:
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message=f"不支援的 artifact 類型：{artifact_type}",
+            )
+            return
+
+        # Slides use a tighter text budget to keep the total LLM context smaller,
+        # which reduces model reasoning time (TTFT) significantly.
+        if artifact_type == "slides":
+            parts_slides: list[str] = []
+            for doc in docs:
+                if doc.status == "ready":
+                    text = _collect_document_text(doc.collection_name, max_chars=_SLIDES_MAX_PER_DOC_CHARS)
+                    if text:
+                        parts_slides.append(f"=== 文件：{doc.filename} ===\n{text}")
+            combined = "\n\n".join(parts_slides) if parts_slides else "\n\n".join(parts)
+            if len(combined) > _SLIDES_MAX_TOTAL_CHARS:
+                combined = combined[:_SLIDES_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
+        else:
+            combined = "\n\n".join(parts)
+            if len(combined) > _MAX_TOTAL_CHARS:
+                combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
 
         prompt = ARTIFACT_PROMPTS[artifact_type]
         user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
 
-        llm = get_llm()
+        # Use a fresh AsyncClient per generation to avoid stale connection
+        # pool state after asyncio cancellation (previous timeout can corrupt
+        # the shared pool, causing the next streaming request to receive 0 bytes).
+        _stream_client = _fresh_async_client()
+        # Slides may use a dedicated larger model (slides_model) to improve
+        # generation quality and reduce TTFT on complex prompts.
+        from app.routers.settings import _runtime_settings as _rs
+        llm = get_llm(
+            async_client=_stream_client,
+            model_override=_rs.slides_model if artifact_type == "slides" and _rs.slides_model else None,
+            max_tokens_override=16384 if artifact_type == "slides" else None,
+        )
         messages = [
             ChatMessage(role=MessageRole.SYSTEM, content=prompt),
             ChatMessage(role=MessageRole.USER, content=user_msg),
@@ -372,23 +369,83 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 
         update_studio_artifact(artifact_id, progress_message="AI 正在生成內容，請耐心等候…")
 
-        # Use streaming to avoid httpx.ReadTimeout on long JSON responses
-        # (non-streaming waits for the full response before the first byte arrives)
+        # Streaming with auto-retry on zero-char timeout.
+        # The model server can be temporarily overloaded, causing 0 chars within
+        # the timeout. A fresh client + brief pause before retry often succeeds.
         raw_parts: list[str] = []
         total_chars = 0
         last_progress_chars = 0
-        async for chunk in await llm.astream_chat(messages):
-            if chunk.delta:
-                raw_parts.append(chunk.delta)
-                total_chars += len(chunk.delta)
-                if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
-                    last_progress_chars = total_chars
+        for _attempt in range(1 + _STREAM_MAX_RETRIES):
+            if _attempt > 0:
+                logging.info(
+                    "Retrying LLM stream for artifact %d (attempt %d/%d)",
+                    artifact_id, _attempt + 1, 1 + _STREAM_MAX_RETRIES,
+                )
+                update_studio_artifact(
+                    artifact_id,
+                    progress_message=f"AI 伺服器忙碌，自動重試中（第 {_attempt + 1} 次）…",
+                )
+                await asyncio.sleep(5)
+                await _stream_client.aclose()
+                _stream_client = _fresh_async_client()
+                llm = get_llm(async_client=_stream_client)
+
+            raw_parts = []
+            total_chars = 0
+            last_progress_chars = 0
+            try:
+                async with asyncio.timeout(_STREAM_TIMEOUT_SECS):
+                    async for chunk in await llm.astream_chat(messages):
+                        if chunk.delta:
+                            raw_parts.append(chunk.delta)
+                            total_chars += len(chunk.delta)
+                            if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
+                                last_progress_chars = total_chars
+                                update_studio_artifact(
+                                    artifact_id,
+                                    progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
+                                )
+            except TimeoutError:
+                logging.warning(
+                    "LLM streaming timed out after %ds for artifact %d (got %d chars, attempt %d)",
+                    _STREAM_TIMEOUT_SECS, artifact_id, total_chars, _attempt + 1,
+                )
+                if total_chars == 0 and _attempt < _STREAM_MAX_RETRIES:
+                    continue  # retry
+                if not raw_parts:
                     update_studio_artifact(
                         artifact_id,
-                        progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
+                        status="error",
+                        error_message=f"AI 伺服器忙碌，{_STREAM_TIMEOUT_SECS} 秒內未回應（已重試 {_attempt + 1} 次），請稍後重試。",
                     )
+                    await _stream_client.aclose()
+                    return
+                # Got partial content — try to use what we have
+            break  # success or partial — stop retrying
+        await _stream_client.aclose()
         raw = "".join(raw_parts).strip()
         raw = _strip_code_fence(raw)
+
+        if not raw:
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="AI 未產生任何內容，可能模型暫時無法回應，請稍後重試。",
+            )
+            return
+
+        if artifact_type == "slides":
+            # LLM returns PptxGenJS JavaScript code (not JSON).
+            # Save code but keep status="generating" so the frontend keeps polling.
+            # _generate_slides_pptx_bg will set status="done" after thumbnails are ready.
+            update_studio_artifact(
+                artifact_id,
+                content_json="{}",
+                content_text=raw,
+                progress_message="AI 產碼完成，正在建立簡報…",
+            )
+            asyncio.create_task(_generate_slides_pptx_bg(artifact_id, raw))
+            return
 
         data = json.loads(raw)
         content_text = _format_text(artifact_type, data)
@@ -401,18 +458,14 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             content_text=content_text,
         )
 
-        # For slides, kick off thumbnail generation in a separate task
-        # so the artifact status flips to "done" immediately.
-        if artifact_type == "slides":
-            asyncio.create_task(_generate_thumbnails_bg(artifact_id, content_json_str))
-
     except json.JSONDecodeError:
-        # LLM output wasn't valid JSON — store raw text so user can still read it
+        # LLM output wasn't valid JSON — store raw text for debugging
         update_studio_artifact(
             artifact_id,
-            status="done",
+            status="error",
             content_json="{}",
             content_text=raw,
+            error_message="AI 回應格式有誤，無法解析內容，請稍後重試。",
         )
     except Exception:
         logging.exception("Studio artifact generation failed: project=%s type=%s", project_id, artifact_type)
@@ -423,10 +476,115 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         )
 
 
-async def _generate_thumbnails_bg(artifact_id: int, content_json: str) -> None:
-    """Run thumbnail generation in a thread (non-blocking background task)."""
-    from app.services.thumbnail_service import generate_thumbnails
+_THUMB_ROOT = Path("/data/thumbnails")
+
+
+async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:
+    """
+    Ask the LLM to fix an error in PptxGenJS code.
+    Returns the corrected code, or the original code if the fix attempt fails.
+    """
+    fix_prompt = (
+        "以下 PptxGenJS 程式碼執行時發生錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
+        "不加任何說明或 markdown 標記。\n\n"
+        "重要提醒：每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg}) 才能使用 sld。\n\n"
+        f"錯誤訊息：{error_msg}\n\n"
+        f"程式碼：\n{code}"
+    )
+    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
+    fix_client = _fresh_async_client()
+    llm = get_llm(async_client=fix_client)
     try:
-        await asyncio.to_thread(generate_thumbnails, artifact_id, content_json)
+        parts: list[str] = []
+        async for chunk in await llm.astream_chat(messages):
+            if chunk.delta:
+                parts.append(chunk.delta)
+        fixed = "".join(parts).strip()
+        fixed = _strip_code_fence(fixed)
+        return fixed if fixed else code
     except Exception:
-        logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+        logging.exception("Code fix LLM call failed for artifact — using original code")
+        return code
+    finally:
+        await fix_client.aclose()
+
+
+async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
+    """
+    Background task for slides:
+      1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
+         On SyntaxError or RuntimeError: ask LLM to fix and retry once.
+      2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
+      3. Convert .pptx → JPEG thumbnails (soffice → fitz)
+    """
+    from app.services.pptx_runner_service import execute_pptxgenjs, RunResult
+    from app.services.thumbnail_service import generate_thumbnails
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pptx_tmp = str(Path(tmp) / "slides.pptx")
+        update_studio_artifact(artifact_id, progress_message="正在執行 PptxGenJS 生成簡報…")
+
+        result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+
+        # On syntax or runtime error: ask LLM to fix then retry once
+        if result in (RunResult.SYNTAX_ERROR, RunResult.RUNTIME_ERROR):
+            logging.warning("PptxGenJS %s for artifact %d — asking LLM to fix", result.value, artifact_id)
+            update_studio_artifact(artifact_id, progress_message="偵測到執行錯誤，正在要求 AI 修正…")
+            pptxgenjs_code = await _fix_pptxgenjs_code(pptxgenjs_code, stderr)
+            update_studio_artifact(artifact_id, progress_message="重新執行修正後的程式碼…")
+            # Remove stale output file from first attempt before retry
+            Path(pptx_tmp).unlink(missing_ok=True)
+            result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+
+        if result != RunResult.SUCCESS:
+            logging.error(
+                "PptxGenJS execution failed for artifact %d (%s): %s",
+                artifact_id, result, stderr,
+            )
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="PptxGenJS 執行失敗，請稍後重試。",
+            )
+            return
+
+        # Persist PPTX alongside thumbnails so it can be served as a static file
+        # at /thumbnails/{artifact_id}/slides.pptx
+        persistent_dir = _THUMB_ROOT / str(artifact_id)
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        pptx_path = persistent_dir / "slides.pptx"
+        shutil.copy2(pptx_tmp, pptx_path)
+
+        update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
+        try:
+            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+        except Exception:
+            logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="縮圖生成失敗，請稍後重試。",
+            )
+            return
+
+        # Optional: Vision QA — only runs when vision_model is configured
+        from app.routers.settings import _runtime_settings
+        from app.services.vision_qa import visual_qa_check
+        from app.services.thumbnail_service import get_thumbnail_urls
+
+        if _runtime_settings.vision_model:
+            thumb_urls = get_thumbnail_urls(artifact_id)
+            thumb_paths = [_THUMB_ROOT / str(artifact_id) / Path(u).name for u in thumb_urls]
+            update_studio_artifact(artifact_id, progress_message="正在進行視覺品質檢查…")
+            issues = await visual_qa_check(
+                thumb_paths,
+                api_base_url=_runtime_settings.llm_api_base_url,
+                api_key=_runtime_settings.llm_api_key,
+                model=_runtime_settings.vision_model,
+            )
+            problem_count = sum(len(s.get("issues", [])) for s in issues)
+            if problem_count > 0:
+                logging.warning("Vision QA found %d issue(s) in artifact %d: %s", problem_count, artifact_id, issues)
+
+        # Thumbnails ready — mark artifact as done so frontend stops polling
+        update_studio_artifact(artifact_id, status="done", progress_message="")

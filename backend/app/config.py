@@ -26,13 +26,17 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "nvidia/nemotron-3-nano-30b-a3b-fp8"
     embedding_model: str = "nvidia/nv-embed-v2"
-    llm_max_tokens: int = 16384
+    llm_max_tokens: int = 8192
+    vision_model: str = ""   # Optional: vision model for OCR/image understanding (empty = disabled)
+    slides_model: str = ""   # Optional: dedicated model for slides generation (empty = use llm_model)
+    vlm_dpi: int = 96  # DPI for VLM image rendering (higher = better quality, slower)
 
     # ── Data paths ───────────────────────────────────────────
     upload_dir: str = os.getenv("UPLOAD_DIR", "/data/uploads")
     chroma_db_dir: str = os.getenv("CHROMA_DB_DIR", "/data/chroma_db")
 
     # ── Auth & CORS ────────────────────────────────────────
+    environment: str = "development"  # Set to "production" to enforce JWT_SECRET_KEY
     jwt_secret_key: str = ""
     jwt_expiry_hours: int = 24
     cors_origins: str = "http://localhost:3000,http://localhost:3100"
@@ -53,8 +57,13 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     s = Settings()
     if not s.jwt_secret_key:
-        # No key configured – generate a random one for this session.
-        # WARNING: tokens become invalid on restart. Set JWT_SECRET_KEY in .env for persistence.
+        if s.environment == "production":
+            raise RuntimeError(
+                "JWT_SECRET_KEY must be set in production. "
+                "Set it in your environment or .env file."
+            )
+        # Development only: generate a random key for this session.
+        # WARNING: tokens become invalid on restart.
         s.jwt_secret_key = secrets.token_hex(32)
         log.warning(
             "JWT_SECRET_KEY is not set. A random key has been generated for this session. "

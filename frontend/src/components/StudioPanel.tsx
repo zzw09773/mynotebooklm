@@ -5,12 +5,12 @@ import {
     Mic2, Video, GitBranch, FileText, CreditCard,
     HelpCircle, BarChart2, Table, X, ChevronLeft,
     RefreshCw, Loader2, CheckCircle, AlertCircle, Presentation,
+    Download, Play,
 } from "lucide-react";
 import {
     ArtifactType,
     StudioArtifact,
     PodcastContent,
-    SlidesContent,
     MindMapContent,
     FlashcardsContent,
     QuizContent,
@@ -61,16 +61,19 @@ interface Props {
     onAskQuestion?: (question: string) => void;
 }
 
-// ── Viewer dispatcher ─────────────────────────────────────────
+// ── Full viewer dispatcher ─────────────────────────────────────
 
 function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact; onAskQuestion?: (q: string) => void }) {
     if (artifact.status !== "done") return null;
 
-    if (artifact.artifact_type === "video_script" || artifact.artifact_type === "report") {
-        // text-only types
-        if (artifact.artifact_type === "report") {
-            return <ReportViewer markdown={artifact.content_text} />;
-        }
+    if (artifact.artifact_type === "slides") {
+        return <SlidesViewer code={artifact.content_text} artifactId={artifact.id} />;
+    }
+
+    if (artifact.artifact_type === "report") {
+        return <ReportViewer markdown={artifact.content_text} />;
+    }
+    if (artifact.artifact_type === "video_script") {
         return <VideoScriptViewer script={artifact.content_text} />;
     }
 
@@ -79,16 +82,6 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
         switch (artifact.artifact_type) {
             case "podcast":
                 return <PodcastViewer data={data as PodcastContent} />;
-            case "slides": {
-                // Defensively normalise: LLM sometimes wraps slides under a nested key
-                const slidesData: SlidesContent = Array.isArray(data?.slides)
-                    ? data
-                    : data?.content ?? data;
-                if (!Array.isArray(slidesData?.slides)) {
-                    return <pre className="text-xs whitespace-pre-wrap text-gray-600">{artifact.content_json}</pre>;
-                }
-                return <SlidesViewer data={slidesData} artifactId={artifact.id} />;
-            }
             case "mindmap":
                 return <MindMapViewer data={data as MindMapContent} onAskQuestion={onAskQuestion} />;
             case "flashcards":
@@ -107,15 +100,155 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
     }
 }
 
+// ── Preview card (below grid) ─────────────────────────────────
+
+function ArtifactPreview({
+    config,
+    artifact,
+    onView,
+    onGenerate,
+    onRetry,
+}: {
+    config: ArtifactConfig;
+    artifact?: StudioArtifact;
+    onView: () => void;
+    onGenerate: () => void;
+    onRetry: () => void;
+}) {
+    const Icon = config.icon;
+    const status = artifact?.status ?? "idle";
+
+    if (status === "generating") {
+        return (
+            <div className="mt-4 rounded-xl border border-blue-500/30 bg-blue-500/5 p-4 flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
+                    <span className="text-sm font-medium text-[var(--text-primary)]">{config.label} — 生成中</span>
+                </div>
+                <div className="w-full h-1.5 rounded-full bg-[var(--bg-hover)] overflow-hidden">
+                    <div className="h-full w-1/2 rounded-full bg-blue-500 animate-pulse" />
+                </div>
+                {artifact?.progress_message && (
+                    <p className="text-xs text-blue-400">{artifact.progress_message}</p>
+                )}
+            </div>
+        );
+    }
+
+    if (status === "error") {
+        return (
+            <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/5 p-4 flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                    <span className="text-sm font-medium text-[var(--text-primary)]">{config.label} — 生成失敗</span>
+                </div>
+                {artifact?.error_message && (
+                    <p className="text-xs text-red-400">{artifact.error_message}</p>
+                )}
+                <button
+                    onClick={onRetry}
+                    className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-xs text-red-400 transition-colors"
+                >
+                    <RefreshCw className="w-3.5 h-3.5" /> 重新生成
+                </button>
+            </div>
+        );
+    }
+
+    if (status === "done") {
+        // Slides: show first thumbnail + download button
+        if (artifact?.artifact_type === "slides") {
+            const thumbSrc = `/thumbnails/${artifact.id}/slide_000.jpg`;
+            const downloadUrl = `/thumbnails/${artifact.id}/slides.pptx`;
+            return (
+                <div className="mt-4 rounded-xl border border-[var(--border-default)] bg-[var(--bg-card)] p-4 flex flex-col gap-3">
+                    <div className="relative w-full rounded-lg overflow-hidden" style={{ paddingBottom: "56.25%" }}>
+                        <img
+                            src={thumbSrc}
+                            alt="簡報預覽"
+                            className="absolute inset-0 w-full h-full object-cover"
+                        />
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-[var(--text-muted)]">點擊查看所有投影片</span>
+                        <div className="flex items-center gap-2">
+                            <a
+                                href={downloadUrl}
+                                download="簡報.pptx"
+                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] transition-colors"
+                            >
+                                <Download className="w-3.5 h-3.5" /> 下載
+                            </a>
+                            <button
+                                onClick={onView}
+                                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-500 hover:bg-blue-600 text-xs text-white transition-colors"
+                            >
+                                <Play className="w-3 h-3" /> 查看簡報
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Other artifacts: text preview (first 120 chars)
+        const preview = (() => {
+            if (artifact?.content_text) return artifact.content_text.slice(0, 120);
+            try {
+                return JSON.stringify(JSON.parse(artifact?.content_json ?? "")).slice(0, 120);
+            } catch {
+                return "";
+            }
+        })();
+
+        return (
+            <div className="mt-4 rounded-xl border border-[var(--border-default)] bg-[var(--bg-card)] p-4 flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                    <Icon className="w-4 h-4 text-[var(--text-muted)] flex-shrink-0" />
+                    <span className="text-sm font-medium text-[var(--text-primary)]">{config.label}</span>
+                </div>
+                {preview && (
+                    <p className="text-xs text-[var(--text-secondary)] line-clamp-3">{preview}…</p>
+                )}
+                <button
+                    onClick={onView}
+                    className="self-start flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-500 hover:bg-blue-600 text-xs text-white transition-colors"
+                >
+                    <Play className="w-3 h-3" /> 查看完整內容
+                </button>
+            </div>
+        );
+    }
+
+    // idle
+    return (
+        <div className="mt-4 rounded-xl border border-[var(--border-default)] bg-[var(--bg-card)] p-4 flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+                <Icon className="w-4 h-4 text-[var(--text-muted)] flex-shrink-0" />
+                <span className="text-sm font-medium text-[var(--text-primary)]">{config.label}</span>
+            </div>
+            <p className="text-xs text-[var(--text-muted)]">尚未生成。點擊下方按鈕開始。</p>
+            <button
+                onClick={onGenerate}
+                className="self-start px-3 py-1.5 rounded-lg bg-blue-500 hover:bg-blue-600 text-xs text-white transition-colors"
+            >
+                生成
+            </button>
+        </div>
+    );
+}
+
 // ── Grid card ─────────────────────────────────────────────────
 
 function GridCard({
     config,
     artifact,
+    isFocused,
     onClick,
 }: {
     config: ArtifactConfig;
     artifact?: StudioArtifact;
+    isFocused: boolean;
     onClick: () => void;
 }) {
     const Icon = config.icon;
@@ -128,20 +261,20 @@ function GridCard({
         return null;
     };
 
-    const borderCls =
-        status === "done"
-            ? "border-green-500/40 bg-green-500/10 hover:bg-green-500/20"
-            : status === "error"
-            ? "border-red-500/40 bg-red-500/10 hover:bg-red-500/20"
-            : status === "generating"
-            ? "border-blue-500/40 bg-blue-500/10"
-            : "border-[var(--border-default)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)]";
+    const borderCls = isFocused
+        ? "border-blue-500/60 bg-blue-500/10 ring-2 ring-blue-500/30"
+        : status === "done"
+        ? "border-green-500/40 bg-green-500/10 hover:bg-green-500/20"
+        : status === "error"
+        ? "border-red-500/40 bg-red-500/10 hover:bg-red-500/20"
+        : status === "generating"
+        ? "border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20"
+        : "border-[var(--border-default)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)]";
 
     return (
         <button
             onClick={onClick}
-            disabled={status === "generating"}
-            className={`relative flex flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition-colors ${borderCls} disabled:cursor-not-allowed`}
+            className={`relative flex flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition-colors cursor-pointer ${borderCls}`}
         >
             {badge() && (
                 <span className="absolute top-1.5 right-1.5">{badge()}</span>
@@ -156,6 +289,7 @@ function GridCard({
 
 export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
     const [artifacts, setArtifacts] = useState<ArtifactMap>({});
+    const [focused, setFocused] = useState<ArtifactType | null>(null);
     const [selected, setSelected] = useState<ArtifactType | null>(null);
     const [error, setError] = useState("");
     const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -200,16 +334,12 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
 
     const handleCardClick = async (type: ArtifactType) => {
         const a = artifacts[type];
-        if (a?.status === "done") {
-            setSelected(type);
-            return;
-        }
+        setFocused(type);
+        if (a?.status === "done" || a?.status === "generating") return;
         if (a?.status === "error") {
-            // Re-trigger with force
             await triggerGenerate(type, true);
             return;
         }
-        // idle / pending → trigger
         await triggerGenerate(type, false);
     };
 
@@ -225,6 +355,8 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
     };
 
     const selectedArtifact = selected ? artifacts[selected] : undefined;
+    const focusedConfig = focused ? CONFIGS.find((c) => c.type === focused) : undefined;
+    const focusedArtifact = focused ? artifacts[focused] : undefined;
 
     return (
         <div className="flex flex-col h-full w-[480px] flex-shrink-0 border-l border-[var(--border-default)] bg-[var(--bg-secondary)]">
@@ -270,6 +402,7 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
                 )}
 
                 {selected && selectedArtifact ? (
+                    // Full viewer mode
                     selectedArtifact.status === "generating" ? (
                         <div className="flex flex-col items-center gap-3 py-16 text-[var(--text-muted)]">
                             <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
@@ -286,9 +419,10 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
                         <ArtifactViewer artifact={selectedArtifact} onAskQuestion={onAskQuestion} />
                     )
                 ) : (
+                    // Grid + preview mode
                     <>
                         <p className="text-xs text-[var(--text-muted)] mb-3">
-                            點擊格子生成 AI 內容；完成後再次點擊查看。
+                            點擊格子生成 AI 內容；完成後在下方預覽，點擊查看完整內容。
                         </p>
                         <div className="grid grid-cols-3 gap-3">
                             {CONFIGS.map((cfg) => (
@@ -296,10 +430,21 @@ export function StudioPanel({ activeProject, onClose, onAskQuestion }: Props) {
                                     key={cfg.type}
                                     config={cfg}
                                     artifact={artifacts[cfg.type]}
+                                    isFocused={focused === cfg.type}
                                     onClick={() => handleCardClick(cfg.type)}
                                 />
                             ))}
                         </div>
+
+                        {focused && focusedConfig && (
+                            <ArtifactPreview
+                                config={focusedConfig}
+                                artifact={focusedArtifact}
+                                onView={() => setSelected(focused)}
+                                onGenerate={() => triggerGenerate(focused, false)}
+                                onRetry={() => triggerGenerate(focused, true)}
+                            />
+                        )}
                     </>
                 )}
             </div>

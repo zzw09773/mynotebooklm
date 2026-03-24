@@ -1,6 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 
+// Allow long-running LLM / streaming requests (Next.js route segment config)
+export const maxDuration = 300;
+
 const BACKEND_URL = process.env.BACKEND_URL || "http://backend:8000";
+
+// Timeout for proxy fetch calls — 5 minutes to accommodate slow LLM responses
+const PROXY_TIMEOUT_MS = 5 * 60 * 1000;
+
+function proxySignal(): AbortSignal {
+    return AbortSignal.timeout(PROXY_TIMEOUT_MS);
+}
+
+function gatewayError(cause: unknown): NextResponse {
+    const msg = cause instanceof Error ? cause.message : String(cause);
+    return new NextResponse(JSON.stringify({ detail: `Proxy error: ${msg}` }), {
+        status: 504,
+        headers: { "Content-Type": "application/json" },
+    });
+}
 
 export async function GET(
     request: NextRequest,
@@ -8,13 +26,18 @@ export async function GET(
 ) {
     const { path } = await params;
     const target = `${BACKEND_URL}/api/${path.join("/")}${request.nextUrl.search}`;
-    const res = await fetch(target, {
-        headers: Object.fromEntries(request.headers),
-    });
-    return new NextResponse(res.body, {
-        status: res.status,
-        headers: Object.fromEntries(res.headers),
-    });
+    try {
+        const res = await fetch(target, {
+            headers: Object.fromEntries(request.headers),
+            signal: proxySignal(),
+        });
+        return new NextResponse(res.body, {
+            status: res.status,
+            headers: Object.fromEntries(res.headers),
+        });
+    } catch (err) {
+        return gatewayError(err);
+    }
 }
 
 export async function POST(
@@ -38,13 +61,19 @@ export async function POST(
         if (k !== "host" && k !== "content-length") headers[k] = v;
     });
 
-    const res = await fetch(target, {
-        method: "POST",
-        headers,
-        body,
-        // @ts-ignore
-        duplex: "half",
-    });
+    let res: Response;
+    try {
+        res = await fetch(target, {
+            method: "POST",
+            headers,
+            body,
+            signal: proxySignal(),
+            // @ts-ignore
+            duplex: "half",
+        });
+    } catch (err) {
+        return gatewayError(err);
+    }
 
     // For SSE / streaming responses, set proper headers
     const resContentType = res.headers.get("content-type") || "";
@@ -75,14 +104,19 @@ export async function DELETE(
 ) {
     const { path } = await params;
     const target = `${BACKEND_URL}/api/${path.join("/")}${request.nextUrl.search}`;
-    const res = await fetch(target, {
-        method: "DELETE",
-        headers: Object.fromEntries(request.headers),
-    });
-    return new NextResponse(res.body, {
-        status: res.status,
-        headers: Object.fromEntries(res.headers),
-    });
+    try {
+        const res = await fetch(target, {
+            method: "DELETE",
+            headers: Object.fromEntries(request.headers),
+            signal: proxySignal(),
+        });
+        return new NextResponse(res.body, {
+            status: res.status,
+            headers: Object.fromEntries(res.headers),
+        });
+    } catch (err) {
+        return gatewayError(err);
+    }
 }
 
 export async function PUT(
@@ -98,15 +132,15 @@ export async function PUT(
         if (k !== "host" && k !== "content-length") headers[k] = v;
     });
 
-    const res = await fetch(target, {
-        method: "PUT",
-        headers,
-        body,
-    });
-    return new NextResponse(res.body, {
-        status: res.status,
-        headers: Object.fromEntries(res.headers),
-    });
+    try {
+        const res = await fetch(target, { method: "PUT", headers, body, signal: proxySignal() });
+        return new NextResponse(res.body, {
+            status: res.status,
+            headers: Object.fromEntries(res.headers),
+        });
+    } catch (err) {
+        return gatewayError(err);
+    }
 }
 
 export async function PATCH(
@@ -122,9 +156,13 @@ export async function PATCH(
         if (k !== "host" && k !== "content-length") headers[k] = v;
     });
 
-    const res = await fetch(target, { method: "PATCH", headers, body });
-    return new NextResponse(res.body, {
-        status: res.status,
-        headers: Object.fromEntries(res.headers),
-    });
+    try {
+        const res = await fetch(target, { method: "PATCH", headers, body, signal: proxySignal() });
+        return new NextResponse(res.body, {
+            status: res.status,
+            headers: Object.fromEntries(res.headers),
+        });
+    } catch (err) {
+        return gatewayError(err);
+    }
 }

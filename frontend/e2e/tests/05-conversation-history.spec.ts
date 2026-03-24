@@ -2,67 +2,9 @@ import { test, expect } from "@playwright/test";
 import { WorkspacePage } from "../pages/WorkspacePage";
 import { ProjectDashboardPage } from "../pages/ProjectDashboardPage";
 import { TEST_USER, loginViaApi, cleanupProjects } from "../fixtures/auth";
+import { getProjectIdByName, createConversationViaApi, addMessageViaApi } from "../fixtures/api";
 
 const PROJECT_PREFIX = "E2E_ConvHist_";
-const BASE_URL = "http://172.16.120.35:3100";
-
-/**
- * Creates a conversation via API.
- * NOTE: uses path without trailing slash to avoid 308 redirect.
- */
-async function createConversationViaApi(
-    token: string,
-    projectId: number,
-    title: string,
-): Promise<{ id: number; title: string }> {
-    const res = await fetch(`${BASE_URL}/api/conversations`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ project_id: projectId, title }),
-    });
-    if (!res.ok) throw new Error(`Create conversation failed: ${res.status} ${await res.text()}`);
-    return res.json();
-}
-
-/**
- * Adds a message to a conversation via API.
- */
-async function addMessageViaApi(
-    token: string,
-    conversationId: number,
-    role: "user" | "assistant",
-    content: string,
-): Promise<void> {
-    const res = await fetch(`${BASE_URL}/api/conversations/${conversationId}/messages`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ role, content }),
-    });
-    if (!res.ok) {
-        console.warn(`addMessage returned ${res.status}: ${await res.text()}`);
-    }
-}
-
-/**
- * Get the project ID for a project by name prefix.
- */
-async function getProjectIdByName(token: string, name: string): Promise<number | null> {
-    const res = await fetch(`${BASE_URL}/api/projects`, {
-        headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const project = (data.projects || []).find(
-        (p: { id: number; name: string }) => p.name === name,
-    );
-    return project ? project.id : null;
-}
 
 test.describe("Conversation History Loading", () => {
     let authToken: string;

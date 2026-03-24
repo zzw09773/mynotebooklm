@@ -88,11 +88,11 @@ async def _process_document_background(
     """Background task: parse, embed, then update status."""
     try:
         if ext == ".pdf":
-            result = ingest_document(file_path, filename)
+            result = await ingest_document(file_path, filename)
         elif ext == ".md":
             result = ingest_markdown(file_path, filename)
         else:
-            result = ingest_image(file_path, filename)
+            result = await ingest_image(file_path, filename)
 
         update_document_status(
             collection_name,

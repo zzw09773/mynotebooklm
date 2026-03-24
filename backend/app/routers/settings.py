@@ -41,6 +41,10 @@ def _build_runtime_settings():
         base.chunk_size = int(persisted["chunk_size"])
     if persisted.get("llm_max_tokens"):
         base.llm_max_tokens = int(persisted["llm_max_tokens"])
+    if persisted.get("vision_model") is not None:
+        base.vision_model = persisted["vision_model"]
+    if persisted.get("slides_model") is not None:
+        base.slides_model = persisted["slides_model"]
     return base
 
 
@@ -65,6 +69,8 @@ class SettingsResponse(BaseModel):
     top_k: int
     chunk_size: int
     llm_max_tokens: int
+    vision_model: str
+    slides_model: str
 
 
 class SettingsUpdate(BaseModel):
@@ -76,6 +82,8 @@ class SettingsUpdate(BaseModel):
     top_k: int | None = None
     chunk_size: int | None = None
     llm_max_tokens: int | None = None
+    vision_model: str | None = None
+    slides_model: str | None = None
 
 
 class ModelInfo(BaseModel):
@@ -100,6 +108,8 @@ async def get_current_settings(current_user: User = Depends(get_current_user)):
         top_k=_runtime_settings.top_k,
         chunk_size=_runtime_settings.chunk_size,
         llm_max_tokens=_runtime_settings.llm_max_tokens,
+        vision_model=_runtime_settings.vision_model,
+        slides_model=_runtime_settings.slides_model,
     )
 
 
@@ -131,6 +141,12 @@ async def update_settings(update: SettingsUpdate, current_user: User = Depends(g
     if update.llm_max_tokens is not None:
         _runtime_settings.llm_max_tokens = update.llm_max_tokens
         changed["llm_max_tokens"] = str(update.llm_max_tokens)
+    if update.vision_model is not None:
+        _runtime_settings.vision_model = update.vision_model
+        changed["vision_model"] = update.vision_model
+    if update.slides_model is not None:
+        _runtime_settings.slides_model = update.slides_model
+        changed["slides_model"] = update.slides_model
 
     # Persist to DB so settings survive restarts
     for key, value in changed.items():

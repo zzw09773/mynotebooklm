@@ -2,15 +2,15 @@
 Document processing service:
   - Parse PDFs via PyMuPDF (with OCR fallback for scanned pages)
   - Process image files via Tesseract OCR
+  - Optionally supplement OCR with VLM semantic understanding
   - Chunk text with LlamaIndex
   - Store / retrieve vectors in ChromaDB
 """
 import os
 import uuid
-import shutil
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
-from io import BytesIO
 
 import fitz  # PyMuPDF
 import chromadb
@@ -22,6 +22,7 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 
 from app.config import get_settings
 from app.services.llm_service import get_embed_model
+from app.services.vlm_service import describe_image
 
 
 settings = get_settings()
@@ -42,7 +43,19 @@ def _get_chroma_client() -> chromadb.PersistentClient:
     return _chroma_client
 
 
-# ── PDF text extraction (hybrid: native + OCR fallback) ──────
+def _get_vlm_config() -> dict | None:
+    """Return VLM config from runtime settings, or None if vision_model is unset."""
+    from app.routers.settings import _runtime_settings
+    if not _runtime_settings.vision_model:
+        return None
+    return {
+        "api_base_url": _runtime_settings.llm_api_base_url,
+        "api_key": _runtime_settings.llm_api_key,
+        "model": _runtime_settings.vision_model,
+    }
+
+
+# ── PDF text extraction (hybrid: native + OCR + VLM) ────────
 
 def _ocr_page_image(page: fitz.Page) -> str:
     """Render a PDF page to an image and run Tesseract OCR."""
@@ -52,35 +65,60 @@ def _ocr_page_image(page: fitz.Page) -> str:
     return text.strip()
 
 
-def extract_text_from_pdf(file_path: str) -> list[dict]:
+async def extract_text_from_pdf(file_path: str, vlm_config: dict | None = None) -> list[dict]:
     """
     Extract text from a PDF file page by page.
     Uses native text extraction first; falls back to OCR if the page
     has fewer than _OCR_THRESHOLD characters of text (scanned page).
+    If vlm_config is provided, additionally sends each page image to the VLM
+    for semantic understanding (charts, diagrams, etc.).
     Returns a list of dicts: [{"page": 1, "text": "..."}, ...]
     """
     doc = fitz.open(file_path)
     pages = []
     for page_num, page in enumerate(doc, start=1):
         text = page.get_text("text")
-        # If native extraction yields very little text, try OCR
         if len(text.strip()) < _OCR_THRESHOLD:
             ocr_text = _ocr_page_image(page)
             if ocr_text:
                 text = ocr_text
+
+        # VLM semantic understanding — DPI configurable via VLM_DPI env var (default 96)
+        if vlm_config:
+            pix = page.get_pixmap(dpi=settings.vlm_dpi)
+            img_bytes = pix.tobytes("jpeg")
+            vlm_desc = await describe_image(
+                img_bytes,
+                **vlm_config,
+                context_hint=f"這是 PDF 文件的第 {page_num} 頁",
+            )
+            if vlm_desc:
+                text = f"{text}\n\n[圖片理解]\n{vlm_desc}"
+
         if text.strip():
             pages.append({"page": page_num, "text": text})
     doc.close()
     return pages
 
 
-# ── Image OCR extraction ─────────────────────────────────────
+# ── Image OCR + VLM extraction ───────────────────────────────
 
-def extract_text_from_image(file_path: str) -> str:
-    """Run Tesseract OCR on a single image file (.jpg/.png)."""
+async def extract_text_from_image(file_path: str, vlm_config: dict | None = None) -> str:
+    """
+    Run Tesseract OCR on a single image file (.jpg/.png).
+    If vlm_config is provided, also sends the image to the VLM for semantic
+    understanding and appends the description after the OCR text.
+    """
     img = Image.open(file_path)
-    text = pytesseract.image_to_string(img, lang="chi_tra+eng")
-    return text.strip()
+    ocr_text = pytesseract.image_to_string(img, lang="chi_tra+eng").strip()
+
+    if vlm_config:
+        img_bytes = Path(file_path).read_bytes()
+        vlm_desc = await describe_image(img_bytes, **vlm_config)
+        if vlm_desc:
+            return f"{ocr_text}\n\n[圖片理解]\n{vlm_desc}" if ocr_text else vlm_desc
+
+    return ocr_text
 
 
 # ── Document ingestion ───────────────────────────────────────
@@ -96,16 +134,17 @@ def save_uploaded_file(filename: str, content: bytes) -> str:
     return dest
 
 
-def ingest_document(file_path: str, original_filename: str) -> dict:
+async def ingest_document(file_path: str, original_filename: str) -> dict:
     """
     Parse a PDF, chunk it, generate embeddings, and store in ChromaDB.
     Returns metadata about the ingested document.
     """
-    pages = extract_text_from_pdf(file_path)
+    vlm_config = _get_vlm_config()
+    pages = await extract_text_from_pdf(file_path, vlm_config=vlm_config)
     if not pages:
         raise ValueError("PDF 中未萃取到任何文字。")
 
-    # Create LlamaIndex Documents with page‑level metadata
+    # Create LlamaIndex Documents with page-level metadata
     documents = []
     for p in pages:
         doc = Document(
@@ -155,12 +194,13 @@ def ingest_document(file_path: str, original_filename: str) -> dict:
     }
 
 
-def ingest_image(file_path: str, original_filename: str) -> dict:
+async def ingest_image(file_path: str, original_filename: str) -> dict:
     """
-    Process an image file (.jpg/.png) via OCR, chunk it,
+    Process an image file (.jpg/.png) via OCR (+ optional VLM), chunk it,
     generate embeddings, and store in ChromaDB.
     """
-    text = extract_text_from_image(file_path)
+    vlm_config = _get_vlm_config()
+    text = await extract_text_from_image(file_path, vlm_config=vlm_config)
     if not text:
         raise ValueError("圖片中未辨識到任何文字。")
 
@@ -211,6 +251,7 @@ def ingest_markdown(file_path: str, original_filename: str) -> dict:
     """
     Ingest a Markdown (.md) file by reading it as plain text,
     chunking it, generating embeddings, and storing in ChromaDB.
+    Markdown has no images, so no VLM is needed.
     """
     with open(file_path, encoding="utf-8") as f:
         text = f.read().strip()
@@ -288,7 +329,6 @@ def delete_document(collection_name: str, file_path: str | None = None) -> None:
     """Delete a document collection and its uploaded file."""
     client = _get_chroma_client()
     client.delete_collection(name=collection_name)
-    # Clean up the original uploaded file from disk
     if file_path and os.path.exists(file_path):
         os.remove(file_path)
 
@@ -296,13 +336,10 @@ def delete_document(collection_name: str, file_path: str | None = None) -> None:
 # ── Helpers ───────────────────────────────────────────────────
 
 def _sanitize_collection_name(name: str) -> str:
-    """ChromaDB collection names must be 3‑63 chars, ASCII alphanumeric + _-."""
+    """ChromaDB collection names must be 3-63 chars, ASCII alphanumeric + _-."""
     import hashlib
-    # Keep only ASCII alphanumeric, underscore, hyphen
     sanitized = "".join(c if c.isascii() and (c.isalnum() or c in ("_", "-")) else "" for c in name)
-    # Ensure it starts/ends with alphanumeric
     sanitized = sanitized.strip("_-")
     if len(sanitized) < 3:
-        # Use a hash of the original name as fallback
         sanitized = "doc_" + hashlib.md5(name.encode()).hexdigest()[:8]
     return sanitized[:63]

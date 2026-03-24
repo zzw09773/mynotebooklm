@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     llm_model: str = "nvidia/nemotron-3-nano-30b-a3b-fp8"
     embedding_model: str = "nvidia/nv-embed-v2"
     llm_max_tokens: int = 8192
-    vision_model: str = ""  # Optional: vision model for slide QA (empty = disabled)
+    vision_model: str = ""   # Optional: vision model for OCR/image understanding (empty = disabled)
+    slides_model: str = ""   # Optional: dedicated model for slides generation (empty = use llm_model)
     vlm_dpi: int = 96  # DPI for VLM image rendering (higher = better quality, slower)
 
     # ── Data paths ───────────────────────────────────────────

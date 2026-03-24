@@ -47,7 +47,8 @@ def _preprocess_code(code: str) -> str:
     predictably with Unicode strings.
     """
     # Strip trailing non-JS lines added by LLMs (e.g. "--- End of JS code ---",
-    # markdown separators, or explanatory text after the last JS statement).
+    # markdown separators, explanatory text, or lone closing braces that have
+    # no matching open brace in the snippet).
     lines = code.rstrip().split("\n")
     while lines and (
         lines[-1].strip().startswith("---")
@@ -56,6 +57,19 @@ def _preprocess_code(code: str) -> str:
     ):
         lines.pop()
     code = "\n".join(lines)
+
+    # Brace balance: remove extra trailing `}` that the LLM adds when it
+    # imagines the snippet is inside a function or block scope.
+    # Use a simplified count (ignores strings/comments — good enough in practice).
+    extra_close = code.count("}") - code.count("{")
+    if extra_close > 0:
+        log.warning("LLM output has %d unmatched closing brace(s) — stripping from end", extra_close)
+        result = code
+        for _ in range(extra_close):
+            idx = result.rfind("}")
+            if idx >= 0:
+                result = result[:idx] + result[idx + 1:]
+        code = result
 
     # Inject preamble if LLM forgot to define theme/FONT/layout.
     # The check is simple: if neither "var theme" nor "const theme" appears in
@@ -73,6 +87,24 @@ def _preprocess_code(code: str) -> str:
                 'pres.defineLayout({name:"16x9",width:10,height:5.625});\npres.layout="16x9";\n'
                 + code
             )
+
+    # Strip LLM's own PptxGenJS initialization — the sandbox already provides
+    # `pres` (PptxGenJS instance) and `PptxGenJS` (the class).
+    # If the LLM re-declares them via require/new, it shadows the sandbox
+    # globals or fails ("PptxGenJS is not a constructor" when require returns {}).
+    import re
+    code = re.sub(
+        r"^\s*(?:const|var|let)\s+PptxGenJS\s*=\s*require\(['\"]pptxgenjs['\"]\);?\s*$",
+        "",
+        code,
+        flags=re.MULTILINE,
+    )
+    code = re.sub(
+        r"^\s*(?:const|var|let)\s+pres\s*=\s*new\s+PptxGenJS\s*\(\s*\);?\s*$",
+        "",
+        code,
+        flags=re.MULTILINE,
+    )
 
     # Note: automatic quote-mismatch repair ("value' → "value") is intentionally
     # NOT done here — the regex cannot safely distinguish mismatched quotes from

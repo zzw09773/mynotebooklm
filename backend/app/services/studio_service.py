@@ -41,115 +41,59 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
 
 SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 PptxGenJS 程式碼。
 
-═══ 環境 ═══
-`pres`已建立。`addIcon(sld,name,colorHex,x,y,w,h)`可用。畫布10"×5.625"。
-禁用require/import/writeFile/fs/process/module/exports。
-Icon: FaRocket FaShieldAlt FaChartLine FaUsers FaCog FaLightbulb FaDatabase FaCloud FaCode FaGlobe FaLock FaBolt FaStar FaCheck FaArrowUp FaExchangeAlt FaBalanceScale FaHandshake FaTrophy FaFlag FaHeart FaMoneyBillWave FaClipboardList FaSearchDollar FaBullseye FaProjectDiagram FaSitemap FaRegCalendarAlt FaUserTie FaBriefcase FaGavel FaSearch FaBook FaFileAlt FaChartBar FaMapMarkerAlt FaPhone FaEnvelope FaCalendar FaFilter MdDashboard MdAnalytics MdSecurity MdSpeed MdBuild MdInsights MdTrendingUp MdCompareArrows MdTimeline MdAssessment
+環境：pres已建立。addIcon(sld,name,colorHex,x,y,w,h)可用。畫布10"×5.625"。禁用require/import/writeFile/fs/process/module/exports。
+Icon可用：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog MdDashboard MdAnalytics MdSecurity MdTrendingUp
 
-═══ 步驟一：敘事弧線 ═══
-匯報型:背景→發現→數據→啟示→結論 | 提案型:痛點→方案→可行性→佐證→行動
-分析型:定義→拆解→案例→利弊→建議 | 教學型:重要性→概念→步驟→案例→回顧
-敘事型:背景→經過→轉折→影響→結語
-根據弧線重新組織內容順序，不要逐段搬原文。
+敘事弧線（擇一）：匯報:背景→發現→數據→啟示→結論 | 提案:痛點→方案→佐證→行動 | 分析:定義→拆解→利弊→建議 | 教學:重要性→概念→步驟→回顧
 
-═══ 步驟二：選版面（相鄰不重複，≥5種）═══
-1-3個數字→big_number | 比較兩者→dual_column | 3-4並列→card_grid
-有序步驟→process_flow | 結構化數據→table | 趨勢佔比→chart
-金句→quote_slide | 章節轉換→section_divider | 其餘→content_with_icon
-連續3頁密集內容後插入section_divider或quote_slide。
+版面選擇（相鄰不重複，≥5種）：
+1-3個數字→big_number | 比較→dual_column | 3-4並列→card_grid | 步驟→process_flow | 數據→table | 趨勢佔比→chart | 金句→quote_slide | 章節→section_divider | 其餘→content_with_icon
 
-═══ 步驟三：色票(bg/accent/title/text/muted/cardBg) ═══
-tech-innovation(科技AI):1E1E1E/0066FF/FFFFFF/CCCCCC/888888/2A2A2A
-ocean-depths(商業財務):1A2332/2D8B8B/F1FAEE/A8DADC/5A8A8A/243040
-sunset-boulevard(行銷旅遊):264653/E76F51/E9C46A/F4A261/A09060/314D5E
-forest-canopy(環境健康):2D4A2B/A4AC86/FAF9F6/C8CCB8/7D8471/3A5C38
-golden-hour(文化歷史):4A403A/F4A900/D4B896/D4B896/C1666B/5A4E47
-arctic-frost(科學醫療):FAFAFA/4A6FA5/1A2332/334155/909090/D4E4F7
-botanical-garden(教育科普):F5F3ED/4A7C59/333333/555555/B7472A/EBE9E1
-sports-arena(運動競技):1B1F3B/E63946/FFFFFF/D0D0D0/6C7A96/252A4A
-modern-minimalist(設計建築):FFFFFF/708090/36454F/36454F/A0A0A0/F0F0F0
-midnight-galaxy(娛樂創意):2B1E3E/A490C2/E6E6FA/C8B8E0/6B5B8A/3A2D50
-desert-rose(時尚精品):E8D5C4/B87D6D/5D2E46/5D2E46/D4A5A5/F0E4D8
+色票 bg/accent/title/text/muted/cardBg（根據主題選一）：
+tech:1E1E1E/0066FF/FFFFFF/CCCCCC/888888/2A2A2A
+ocean:1A2332/2D8B8B/F1FAEE/A8DADC/5A8A8A/243040
+golden:4A403A/F4A900/D4B896/D4B896/C1666B/5A4E47
+frost:FAFAFA/4A6FA5/1A2332/334155/909090/D4E4F7
+garden:F5F3ED/4A7C59/333333/555555/B7472A/EBE9E1
+sports:1B1F3B/E63946/FFFFFF/D0D0D0/6C7A96/252A4A
 
-═══ 固定開頭 ═══
+固定開頭（必須完整輸出前4行）：
 pres.defineLayout({name:"16x9",width:10,height:5.625});
 pres.layout="16x9";
 var theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
 var FONT="Microsoft JhengHei";
 
-═══ 每張投影片（必須）═══
-var sld = pres.addSlide({bkgd:theme.bg});
-// 接著用 sld.addText / sld.addShape / addIcon(sld,...) 排版
-// 每張新投影片都要重新 var sld = pres.addSlide({bkgd:theme.bg});
+每張投影片：var sld=pres.addSlide({bkgd:theme.bg}); 再排版。每張都要重新宣告sld。
+共用標題（cover/section_divider/quote_slide除外）：accent頂條h:0.06 + addText標題x:0.5,y:0.2,w:9,h:0.6,fontSize:24,bold。
 
-═══ 共用標題（cover/section_divider/quote_slide除外）═══
-sld.addShape(pres.ShapeType.rect,{x:0,y:0,w:10,h:0.06,fill:{color:theme.accent}});
-sld.addText("標題",{x:0.5,y:0.2,w:9,h:0.6,fontSize:24,color:theme.title,fontFace:FONT,bold:true,shrinkText:true});
+版面說明：
+【cover】accent頂條+左裝飾線x:0.5,y:1.5,w:0.07,h:2.4+主標x:0.85,y:1.5,fontSize:40+副標y:2.85,fontSize:18,color:muted+右下色塊x:8.8,y:4.6,w:1,h:0.8
+【section_divider】bg=accent。小標y:1.2,fontSize:14,color:bg,charSpacing:4。主標y:1.8,fontSize:36,color:FFFFFF。描述y:3.3。
+【big_number】多指標：N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+大數字fontSize:52,color:accent+單位fontSize:14+標籤fontSize:13。單一大數字：fontSize:100,x:0.5,y:1.4,w:9,h:2.2,align:center。
+【dual_column】左卡x:0.4,y:1.15,w:4.35,h:3.6,fill:cardBg+accent頂條+icon+標題fontSize:18+要點fontSize:13。中間"VS"。右卡x:5.25結構同左。
+【card_grid】N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+addIcon(0.45尺寸)+標題fontSize:16+說明fontSize:12。
+【process_flow】accent圓形(r=0.35)水平排列+連接線y:1.85+編號fontSize:16+標題y:2.5,fontSize:14+說明y:2.95,fontSize:11。
+【content_with_icon】左icon x:0.5,y:1.4,w:0.9+垂直線x:1.7,h:3.2+右側x:2.0,w:7.5交替標題fontSize:16+說明fontSize:13。
+【quote_slide】bg=cardBg。"\u201C"fontSize:80。引文x:1.2,y:1.7,w:7.6,fontSize:24,italic,align:center。分隔線y:3.9。出處fontSize:14。
+【table】header bold,fill:accent,fontSize:13。交替行fill:cardBg/bg,fontSize:12。x:0.5,y:1.1,w:9。
+【chart】BAR:x:0.8,y:1.2,w:8.4,h:3.8,barDir:"col",chartColors:[theme.accent],showValue:true。PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
+【conclusion】標題fontSize:28+accent線w:2+一句總結italic,color:accent+3條要點卡片y=1.9+i*1.0,h:0.75,fill:cardBg+FaCheck icon。
 
-═══ 版面範例 ═══
-
-【cover】bg=theme.bg。頂部accent條h:0.06。左裝飾線x:0.5,y:1.5,w:0.07,h:2.4。主標題x:0.85,y:1.5,w:8.5,h:1.2,fontSize:40。副標x:0.85,y:2.85,fontSize:18,color:muted。右下色塊x:8.8,y:4.6,w:1,h:0.8。
-
-【section_divider】bg=accent。"SECTION 0N"x:0.6,y:1.2,fontSize:14,color:bg,charSpacing:4。標題x:0.6,y:1.8,fontSize:36,color:FFFFFF。描述x:0.6,y:3.3。
-
-【big_number — 多數字並排（關鍵範例）】
-const stats=[{num:"N1",unit:"單位1",label:"指標一"},{num:"N2",unit:"單位2",label:"指標二"},{num:"N3",unit:"單位3",label:"指標三"}];
-const cardW=2.7,gap=0.45,startX=(10-(stats.length*cardW+(stats.length-1)*gap))/2;
-stats.forEach((s,i)=>{
-  const cx=startX+i*(cardW+gap);
-  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.3,w:cardW,h:3.0,fill:{color:theme.cardBg},rectRadius:0.08});
-  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.3,w:cardW,h:0.06,fill:{color:theme.accent}});
-  sld.addText(s.num,{x:cx,y:1.6,w:cardW,h:1.4,fontSize:52,color:theme.accent,fontFace:FONT,bold:true,align:"center",valign:"middle",shrinkText:true});
-  if(s.unit)sld.addText(s.unit,{x:cx,y:2.9,w:cardW,h:0.4,fontSize:14,color:theme.muted,fontFace:FONT,align:"center",shrinkText:true});
-  sld.addText(s.label,{x:cx+0.2,y:3.5,w:cardW-0.4,h:0.5,fontSize:13,color:theme.text,fontFace:FONT,align:"center",shrinkText:true});
-});
-單一大數字：數字fontSize:100,x:0.5,y:1.4,w:9,h:2.2,align:center。說明y:3.6,fontSize:16,color:muted。
-
-【dual_column】左卡x:0.4,y:1.15,w:4.35,h:3.6,fill:cardBg。頂部accent條h:0.06。icon+標題fontSize:18+要點列表fontSize:13。中間"VS"x:4.35,y:2.6。右卡x:5.25,結構同左。
-
-【card_grid（關鍵範例）】
-const items=[{icon:"FaChartLine",t:"概念一",d:"說明"},{icon:"FaUsers",t:"概念二",d:"說明"},{icon:"FaLightbulb",t:"概念三",d:"說明"}];
-const n=items.length,cW=2.7,cG=0.45,cX=(10-(n*cW+(n-1)*cG))/2;
-items.forEach((it,i)=>{
-  const cx=cX+i*(cW+cG);
-  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.2,w:cW,h:3.4,fill:{color:theme.cardBg},rectRadius:0.08});
-  sld.addShape(pres.ShapeType.rect,{x:cx,y:1.2,w:cW,h:0.06,fill:{color:theme.accent}});
-  addIcon(sld,it.icon,"#"+theme.accent,cx+0.2,1.55,0.45,0.45);
-  sld.addText(it.t,{x:cx+0.2,y:2.15,w:cW-0.4,h:0.45,fontSize:16,color:theme.title,fontFace:FONT,bold:true,shrinkText:true});
-  sld.addText(it.d,{x:cx+0.2,y:2.7,w:cW-0.4,h:1.6,fontSize:12,color:theme.text,fontFace:FONT,valign:"top",shrinkText:true});
-});
-
-【process_flow】圓形r=0.35水平排列。連接線y:1.85。sGap=(9.0-sN*0.7)/(sN-1)。每步：accent圓+白色編號fontSize:16 → 標題y:2.5,fontSize:14 → 說明y:2.95,fontSize:11。
-
-【content_with_icon】左icon x:0.5,y:1.4,w:0.9。垂直線x:1.7,w:0.04,h:3.2。右側addText陣列x:2.0,w:7.5交替粗體標題fontSize:16+說明fontSize:13。
-
-【quote_slide】bg=cardBg。"\u201C"fontSize:80,x:0.8,y:0.8。引文x:1.2,y:1.7,w:7.6,fontSize:24,italic,align:center。分隔線y:3.9。出處y:4.1,fontSize:14。
-
-【table】header:bold,color:FFFFFF,fill:accent,fontSize:13。交替行fill:cardBg/bg,fontSize:12。x:0.5,y:1.1,w:9。
-
-【chart】BAR:x:0.8,y:1.2,w:8.4,h:3.8,barDir:"col",chartColors:[theme.accent],valGridLine:{color:theme.cardBg,size:0.5},catGridLine:{style:"none"},showValue:true,showLegend:false。
-PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
-
-【conclusion】標題fontSize:28。accent線w:2。一句總結italic,color:accent。3條要點用卡片y=1.9+i*1.0,h:0.75,fill:cardBg + FaCheck icon + 文字。
-
-═══ 規則 ═══
-- (x+w)≤9.7, (y+h)≤5.5。N卡片：totalW=N*cardW+(N-1)*gap≤9.3, startX=(10-totalW)/2
-- 只用文件真實數據，禁止編造數字/引言。範例中的佔位符（N1、指標一等）必須替換為文件內容。全部繁體中文不混簡體
+規則：
+- (x+w)≤9.7,(y+h)≤5.5。N卡片：totalW=N*2.7+(N-1)*0.45≤9.3，startX=(10-totalW)/2
+- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
 - 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
-- 不連續兩頁同版面。一頁最多4卡片/5步驟。數字用big_number不用bullet
+- 不連續兩頁同版面。一頁最多4卡片/5步驟。有數字用big_number不用bullet
 
-═══ 程式碼規則（違反會造成執行錯誤）═══
-- 每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg})，再用 sld 排版
-- 所有字串用雙引號（"），禁用單引號（'）
-- 每個變數名只宣告一次，不同投影片請用不同名稱（如 items1/items2，cx1/cx2）
-- 程式碼結尾只到最後一個 JS 語句（};），不加 ---、//、說明文字
-- 禁止使用 ShapeType.circle（請用 ShapeType.ellipse）
-- addShape 只使用 ShapeType.rect 或 ShapeType.ellipse；畫線請用 addShape(pres.ShapeType.rect,{w:長度,h:0.04,...}) 模擬
-- 禁止使用 let/const（已由 runner 轉換，但直接用 var 更安全）
+程式碼規則（違反會執行錯誤）：
+- 每張投影片先var sld=pres.addSlide({bkgd:theme.bg})
+- 所有字串用雙引號，禁用單引號
+- 每個變數只宣告一次，不同投影片用不同名（stats1/stats2，cx1/cx2）
+- 程式碼結尾只到最後一個};，不加---或說明文字
+- 禁用ShapeType.circle（改用ellipse）。addShape只用rect或ellipse
+- 用var，不用let/const
 
-═══ 輸出 ═══
-只輸出JS。第一行必須是 pres.defineLayout(...)，第二行是 pres.layout="16x9"，第三行是 var theme={...}，第四行是 var FONT="Microsoft JhengHei"。缺少這四行會造成執行錯誤。不加```或說明。不呼叫writeFile()。
-12-16頁。首頁cover末頁conclusion。≥5種版面。≥5頁用addIcon。
+輸出：只輸出JS，不加```。前4行必須是defineLayout/layout/theme/FONT。不呼叫writeFile()。8-12頁，首頁cover末頁conclusion，≥4種版面，≥4頁用addIcon。
 """
 
 VIDEO_SCRIPT_PROMPT = """你是一位專業的影片旁白撰寫人。請根據以下文件內容，撰寫一段影片解說旁白腳本。
@@ -312,8 +256,11 @@ _TEXT_ONLY_TYPES = {"video_script", "report"}
 
 _MAX_PER_DOC_CHARS = 8000
 _MAX_TOTAL_CHARS = 20000
+_SLIDES_MAX_PER_DOC_CHARS = 6000   # enough material per doc for 8-12 slides
+_SLIDES_MAX_TOTAL_CHARS = 15000    # allow richer context so LLM can fill 8-12 pages
 _PROGRESS_UPDATE_EVERY = 500  # chars between DB progress updates
 _STREAM_TIMEOUT_SECS = 300    # max seconds to wait for LLM streaming (including first-token latency)
+_STREAM_MAX_RETRIES = 2       # retry attempts when streaming returns 0 chars (server busy)
 
 
 def _strip_code_fence(raw: str) -> str:
@@ -383,9 +330,22 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             )
             return
 
-        combined = "\n\n".join(parts)
-        if len(combined) > _MAX_TOTAL_CHARS:
-            combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
+        # Slides use a tighter text budget to keep the total LLM context smaller,
+        # which reduces model reasoning time (TTFT) significantly.
+        if artifact_type == "slides":
+            parts_slides: list[str] = []
+            for doc in docs:
+                if doc.status == "ready":
+                    text = _collect_document_text(doc.collection_name, max_chars=_SLIDES_MAX_PER_DOC_CHARS)
+                    if text:
+                        parts_slides.append(f"=== 文件：{doc.filename} ===\n{text}")
+            combined = "\n\n".join(parts_slides) if parts_slides else "\n\n".join(parts)
+            if len(combined) > _SLIDES_MAX_TOTAL_CHARS:
+                combined = combined[:_SLIDES_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
+        else:
+            combined = "\n\n".join(parts)
+            if len(combined) > _MAX_TOTAL_CHARS:
+                combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
 
         prompt = ARTIFACT_PROMPTS[artifact_type]
         user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
@@ -394,7 +354,14 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         # pool state after asyncio cancellation (previous timeout can corrupt
         # the shared pool, causing the next streaming request to receive 0 bytes).
         _stream_client = _fresh_async_client()
-        llm = get_llm(async_client=_stream_client)
+        # Slides may use a dedicated larger model (slides_model) to improve
+        # generation quality and reduce TTFT on complex prompts.
+        from app.routers.settings import _runtime_settings as _rs
+        llm = get_llm(
+            async_client=_stream_client,
+            model_override=_rs.slides_model if artifact_type == "slides" and _rs.slides_model else None,
+            max_tokens_override=16384 if artifact_type == "slides" else None,
+        )
         messages = [
             ChatMessage(role=MessageRole.SYSTEM, content=prompt),
             ChatMessage(role=MessageRole.USER, content=user_msg),
@@ -402,40 +369,60 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 
         update_studio_artifact(artifact_id, progress_message="AI 正在生成內容，請耐心等候…")
 
-        # Use streaming to avoid httpx.ReadTimeout on long JSON responses.
-        # Wrap with asyncio.timeout so a completely unresponsive model
-        # doesn't hang the task forever (the model can take ~70s before
-        # the first token for complex prompts like SLIDES_PROMPT).
+        # Streaming with auto-retry on zero-char timeout.
+        # The model server can be temporarily overloaded, causing 0 chars within
+        # the timeout. A fresh client + brief pause before retry often succeeds.
         raw_parts: list[str] = []
         total_chars = 0
         last_progress_chars = 0
-        try:
-            async with asyncio.timeout(_STREAM_TIMEOUT_SECS):
-                async for chunk in await llm.astream_chat(messages):
-                    if chunk.delta:
-                        raw_parts.append(chunk.delta)
-                        total_chars += len(chunk.delta)
-                        if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
-                            last_progress_chars = total_chars
-                            update_studio_artifact(
-                                artifact_id,
-                                progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
-                            )
-        except TimeoutError:
-            logging.warning(
-                "LLM streaming timed out after %ds for artifact %d (got %d chars)",
-                _STREAM_TIMEOUT_SECS, artifact_id, total_chars,
-            )
-            if not raw_parts:
+        for _attempt in range(1 + _STREAM_MAX_RETRIES):
+            if _attempt > 0:
+                logging.info(
+                    "Retrying LLM stream for artifact %d (attempt %d/%d)",
+                    artifact_id, _attempt + 1, 1 + _STREAM_MAX_RETRIES,
+                )
                 update_studio_artifact(
                     artifact_id,
-                    status="error",
-                    error_message=f"AI 回應逾時（{_STREAM_TIMEOUT_SECS} 秒內未產生內容），請稍後重試。",
+                    progress_message=f"AI 伺服器忙碌，自動重試中（第 {_attempt + 1} 次）…",
                 )
-                return
-            # Got partial content — try to use what we have
-        finally:
-            await _stream_client.aclose()
+                await asyncio.sleep(5)
+                await _stream_client.aclose()
+                _stream_client = _fresh_async_client()
+                llm = get_llm(async_client=_stream_client)
+
+            raw_parts = []
+            total_chars = 0
+            last_progress_chars = 0
+            try:
+                async with asyncio.timeout(_STREAM_TIMEOUT_SECS):
+                    async for chunk in await llm.astream_chat(messages):
+                        if chunk.delta:
+                            raw_parts.append(chunk.delta)
+                            total_chars += len(chunk.delta)
+                            if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
+                                last_progress_chars = total_chars
+                                update_studio_artifact(
+                                    artifact_id,
+                                    progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
+                                )
+            except TimeoutError:
+                logging.warning(
+                    "LLM streaming timed out after %ds for artifact %d (got %d chars, attempt %d)",
+                    _STREAM_TIMEOUT_SECS, artifact_id, total_chars, _attempt + 1,
+                )
+                if total_chars == 0 and _attempt < _STREAM_MAX_RETRIES:
+                    continue  # retry
+                if not raw_parts:
+                    update_studio_artifact(
+                        artifact_id,
+                        status="error",
+                        error_message=f"AI 伺服器忙碌，{_STREAM_TIMEOUT_SECS} 秒內未回應（已重試 {_attempt + 1} 次），請稍後重試。",
+                    )
+                    await _stream_client.aclose()
+                    return
+                # Got partial content — try to use what we have
+            break  # success or partial — stop retrying
+        await _stream_client.aclose()
         raw = "".join(raw_parts).strip()
         raw = _strip_code_fence(raw)
 

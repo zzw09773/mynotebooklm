@@ -39,61 +39,68 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
 5. 輸出必須是合法的 JSON。
 """
 
-SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 PptxGenJS 程式碼。
+SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON 格式的簡報結構。
 
-環境：pres已建立。addIcon(sld,name,colorHex,x,y,w,h)可用。畫布10"×5.625"。禁用require/import/writeFile/fs/process/module/exports。
-Icon可用：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog MdDashboard MdAnalytics MdSecurity MdTrendingUp
+## 色票選擇（根據文件主題選一）
+| 名稱 | 適用場景 |
+|------|---------|
+| tech | 科技、AI、軟體、數位轉型 |
+| ocean | 環境、醫療、教育、公共政策 |
+| golden | 金融、商業、行銷、品牌策略 |
+| frost | 學術、研究、法律、白皮書 |
+| garden | 農業、食品、永續、ESG |
+| sports | 體育、賽事、健康、活力主題 |
 
-敘事弧線（擇一）：匯報:背景→發現→數據→啟示→結論 | 提案:痛點→方案→佐證→行動 | 分析:定義→拆解→利弊→建議 | 教學:重要性→概念→步驟→回顧
+## 可用版面類型
+- cover: 封面（title, subtitle）
+- section_divider: 章節分隔（label, title, description）
+- big_number: 關鍵指標（title, items:[{value,unit,label}], 1-3個）
+- card_grid: 並列卡片（title, cards:[{icon,title,description}], 2-4張）
+- dual_column: 比較（title, left/right:{icon,title,points:[]}）
+- process_flow: 流程步驟（title, steps:[{title,description}], 2-5步）
+- content_with_icon: 圖文（title, icon, blocks:[{title,description}], 1-4個）
+- quote_slide: 金句（quote, source）
+- table: 表格（title, headers:[], rows:[[]]）
+- chart: 圖表（title, chart_type:BAR|PIE, labels:[], values:[]）⚠️ 僅當文件含具體數字時使用
+- conclusion: 結尾（title, summary, points:[{text,icon}]）
 
-版面選擇（相鄰不重複，≥5種）：
-1-3個數字→big_number | 比較→dual_column | 3-4並列→card_grid | 步驟→process_flow | 數據→table | 趨勢佔比→chart | 金句→quote_slide | 章節→section_divider | 其餘→content_with_icon
+可用 icon：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog
 
-色票 bg/accent/title/text/muted/cardBg（根據主題選一）：
-tech:1E1E1E/0066FF/FFFFFF/CCCCCC/888888/2A2A2A
-ocean:1A2332/2D8B8B/F1FAEE/A8DADC/5A8A8A/243040
-golden:4A403A/F4A900/D4B896/D4B896/C1666B/5A4E47
-frost:FAFAFA/4A6FA5/1A2332/334155/909090/D4E4F7
-garden:F5F3ED/4A7C59/333333/555555/B7472A/EBE9E1
-sports:1B1F3B/E63946/FFFFFF/D0D0D0/6C7A96/252A4A
+## 內容規則
+- 首頁 cover，末頁 conclusion
+- 相鄰兩頁不可相同 layout，全簡報 ≥5 種不同 layout
+- 繁體中文，不編造數據或引言
+- 標題≤15字，要點≤25字
+- 有明確數字優先用 big_number；chart 僅用於文件有具體數字時
+- 敘事弧線：匯報(背景→發現→數據→啟示→結論) | 提案(痛點→方案→佐證→行動) | 分析(定義→拆解→利弊→建議) | 教學(重要性→概念→步驟→回顧)
 
-固定開頭（必須完整輸出前4行）：
-pres.defineLayout({name:"16x9",width:10,height:5.625});
-pres.layout="16x9";
-var theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
-var FONT="Microsoft JhengHei";
+## 輸出範例（4頁示意，實際需封面＋12-15頁內容＋結尾，共 14-17 頁）
+```json
+{
+  "theme": "tech",
+  "narrative": "匯報",
+  "slides": [
+    {"layout": "cover", "title": "AI 導入成效報告", "subtitle": "2026 Q1 季度回顧"},
+    {"layout": "big_number", "title": "關鍵指標", "items": [
+      {"value": "98%", "unit": "準確率", "label": "模型推論"},
+      {"value": "3.2x", "unit": "加速", "label": "處理速度"}
+    ]},
+    {"layout": "card_grid", "title": "三大策略方向", "cards": [
+      {"icon": "FaRocket", "title": "擴展部署", "description": "推廣至五個部門"},
+      {"icon": "FaDatabase", "title": "資料整合", "description": "統一資料湖架構"},
+      {"icon": "FaUsers", "title": "人才培訓", "description": "培訓兩百名工程師"}
+    ]},
+    {"layout": "conclusion", "title": "總結與展望", "summary": "AI 導入已見初步成效",
+     "points": [{"text": "模型準確率達 98%"}, {"text": "處理速度提升 3.2 倍"}, {"text": "下季度擴展至全公司", "icon": "FaRocket"}]}
+  ]
+}
+```
 
-每張投影片：var sld=pres.addSlide({bkgd:theme.bg}); 再排版。每張都要重新宣告sld。
-共用標題（cover/section_divider/quote_slide除外）：accent頂條h:0.06 + addText標題x:0.5,y:0.2,w:9,h:0.6,fontSize:24,bold。
-
-版面說明：
-【cover】accent頂條+左裝飾線x:0.5,y:1.5,w:0.07,h:2.4+主標x:0.85,y:1.5,fontSize:40+副標y:2.85,fontSize:18,color:muted+右下色塊x:8.8,y:4.6,w:1,h:0.8
-【section_divider】bg=accent。小標y:1.2,fontSize:14,color:bg,charSpacing:4。主標y:1.8,fontSize:36,color:FFFFFF。描述y:3.3。
-【big_number】多指標：N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+大數字fontSize:52,color:accent+單位fontSize:14+標籤fontSize:13。單一大數字：fontSize:100,x:0.5,y:1.4,w:9,h:2.2,align:center。
-【dual_column】左卡x:0.4,y:1.15,w:4.35,h:3.6,fill:cardBg+accent頂條+icon+標題fontSize:18+要點fontSize:13。中間"VS"。右卡x:5.25結構同左。
-【card_grid】N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+addIcon(0.45尺寸)+標題fontSize:16+說明fontSize:12。
-【process_flow】accent圓形(r=0.35)水平排列+連接線y:1.85+編號fontSize:16+標題y:2.5,fontSize:14+說明y:2.95,fontSize:11。
-【content_with_icon】左icon x:0.5,y:1.4,w:0.9+垂直線x:1.7,h:3.2+右側x:2.0,w:7.5交替標題fontSize:16+說明fontSize:13。
-【quote_slide】bg=cardBg。"\u201C"fontSize:80。引文x:1.2,y:1.7,w:7.6,fontSize:24,italic,align:center。分隔線y:3.9。出處fontSize:14。
-【table】header bold,fill:accent,fontSize:13。交替行fill:cardBg/bg,fontSize:12。x:0.5,y:1.1,w:9。
-【chart】BAR:x:0.8,y:1.2,w:8.4,h:3.8,barDir:"col",chartColors:[theme.accent],showValue:true。PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
-【conclusion】標題fontSize:28+accent線w:2+一句總結italic,color:accent+3條要點卡片y=1.9+i*1.0,h:0.75,fill:cardBg+FaCheck icon。
-
-規則：
-- (x+w)≤9.7,(y+h)≤5.5。N卡片：totalW=N*2.7+(N-1)*0.45≤9.3，startX=(10-totalW)/2
-- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
-- 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
-- 不連續兩頁同版面。一頁最多4卡片/5步驟。有數字用big_number不用bullet
-
-程式碼規則（違反會執行錯誤）：
-- 每張投影片先var sld=pres.addSlide({bkgd:theme.bg})
-- 所有字串用雙引號，禁用單引號
-- 每個變數只宣告一次，不同投影片用不同名（stats1/stats2，cx1/cx2）
-- 程式碼結尾只到最後一個};，不加---或說明文字
-- 禁用ShapeType.circle（改用ellipse）。addShape只用rect或ellipse
-- 用var，不用let/const
-
-輸出：只輸出JS，不加```。前4行必須是defineLayout/layout/theme/FONT。不呼叫writeFile()。8-12頁，首頁cover末頁conclusion，≥4種版面，≥4頁用addIcon。
+## 輸出規則
+- 只輸出 JSON，不加 ```json 標記或任何說明文字
+- slides 陣列必須包含 14-17 頁（1 封面 ＋ 12-15 內容頁 ＋ 1 結尾）
+- 充分利用文件素材，每個主題/章節至少一頁，不要將多個主題壓縮在一頁
+- 輸出必須是合法的 JSON
 """
 
 VIDEO_SCRIPT_PROMPT = """你是一位專業的影片旁白撰寫人。請根據以下文件內容，撰寫一段影片解說旁白腳本。
@@ -271,6 +278,58 @@ def _strip_code_fence(raw: str) -> str:
     return raw
 
 
+def _sanitize_json(raw: str) -> str:
+    """
+    Clean common LLM JSON output issues before Pydantic validation.
+    1. Strip markdown code fences (```json ... ```)
+    2. Remove trailing commas before } or ]
+    3. Unescape literal newlines inside JSON strings
+    """
+    import re
+    # 1. Strip code fences
+    text = _strip_code_fence(raw)
+    # 2. Remove trailing commas: {"a": 1,} → {"a": 1}
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    # 3. Replace literal (unescaped) newlines inside JSON strings with \\n
+    # Only replace newlines that are inside double-quoted strings
+    def _fix_newlines(m: re.Match) -> str:
+        return m.group(0).replace("\n", "\\n").replace("\r", "")
+    text = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', _fix_newlines, text, flags=re.DOTALL)
+    return text.strip()
+
+
+async def _fix_slides_json(raw_json: str, validation_error: str) -> str:
+    """
+    Ask the LLM to fix a JSON validation error in slides spec.
+    Returns the corrected JSON string, or the original if the fix fails.
+    Uses slides_model if configured.
+    """
+    from app.routers.settings import _runtime_settings as _rs
+    fix_prompt = (
+        "以下 JSON 簡報資料有驗證錯誤，請修正並只輸出修正後的完整 JSON，不加任何說明或 markdown 標記。\n\n"
+        f"錯誤訊息：\n{validation_error}\n\n"
+        f"原始 JSON：\n{raw_json}"
+    )
+    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
+    fix_client = _fresh_async_client()
+    llm = get_llm(
+        async_client=fix_client,
+        model_override=_rs.slides_model if _rs.slides_model else None,
+    )
+    try:
+        parts: list[str] = []
+        async for chunk in await llm.astream_chat(messages):
+            if chunk.delta:
+                parts.append(chunk.delta)
+        fixed = "".join(parts).strip()
+        return _sanitize_json(fixed) if fixed else raw_json
+    except Exception:
+        logging.exception("_fix_slides_json LLM call failed — using original JSON")
+        return raw_json
+    finally:
+        await fix_client.aclose()
+
+
 def _format_text(artifact_type: str, data: dict) -> str:
     """Extract a plain-text representation from parsed JSON data."""
     if artifact_type == "video_script":
@@ -360,7 +419,7 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         llm = get_llm(
             async_client=_stream_client,
             model_override=_rs.slides_model if artifact_type == "slides" and _rs.slides_model else None,
-            max_tokens_override=16384 if artifact_type == "slides" else None,
+            max_tokens_override=8192 if artifact_type == "slides" else None,
         )
         messages = [
             ChatMessage(role=MessageRole.SYSTEM, content=prompt),
@@ -435,16 +494,43 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             return
 
         if artifact_type == "slides":
-            # LLM returns PptxGenJS JavaScript code (not JSON).
-            # Save code but keep status="generating" so the frontend keeps polling.
-            # _generate_slides_pptx_bg will set status="done" after thumbnails are ready.
+            # LLM returns structured JSON (SlidesSpec), not PptxGenJS code.
+            # Validate via Pydantic, fix once if needed, then hand off to renderer.
+            from pydantic import ValidationError
+            from app.schemas.slides import SlidesSpec
+
+            sanitized = _sanitize_json(raw)
+            spec: SlidesSpec | None = None
+            try:
+                spec = SlidesSpec.model_validate_json(sanitized)
+            except (ValidationError, Exception) as first_err:
+                logging.warning(
+                    "SlidesSpec validation failed for artifact %d — asking LLM to fix: %s",
+                    artifact_id, str(first_err)[:300],
+                )
+                update_studio_artifact(artifact_id, progress_message="JSON 格式有誤，正在要求 AI 修正…")
+                fixed_json = await _fix_slides_json(sanitized, str(first_err))
+                try:
+                    spec = SlidesSpec.model_validate_json(fixed_json)
+                    sanitized = fixed_json
+                except (ValidationError, Exception) as second_err:
+                    update_studio_artifact(
+                        artifact_id,
+                        status="error",
+                        content_json="{}",
+                        content_text=raw,
+                        error_message=f"簡報 JSON 驗證失敗，請稍後重試。({str(second_err)[:200]})",
+                    )
+                    return
+
+            spec_json = spec.model_dump_json()
             update_studio_artifact(
                 artifact_id,
-                content_json="{}",
-                content_text=raw,
-                progress_message="AI 產碼完成，正在建立簡報…",
+                content_json=spec_json,
+                content_text="",
+                progress_message="AI 產出完成，正在建立簡報…",
             )
-            asyncio.create_task(_generate_slides_pptx_bg(artifact_id, raw))
+            asyncio.create_task(_generate_slides_from_json(artifact_id, spec_json))
             return
 
         data = json.loads(raw)
@@ -477,6 +563,93 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 
 
 _THUMB_ROOT = Path("/data/thumbnails")
+
+# Limit concurrent slides renders (JSON renderer + LibreOffice thumbnail generation
+# both consume significant CPU/memory; cap at 2 to avoid OOM on constrained hosts).
+_SLIDES_SEMAPHORE = asyncio.Semaphore(2)
+
+
+async def _generate_slides_from_json(artifact_id: int, spec_json: str) -> None:
+    """
+    Background task: convert a validated SlidesSpec JSON string into a PPTX
+    file using the deterministic slides_renderer.js template engine, then
+    generate thumbnails and run optional Vision QA.
+    """
+    async with _SLIDES_SEMAPHORE:
+        await _generate_slides_from_json_inner(artifact_id, spec_json)
+
+
+async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> None:
+    import time
+    from app.services.pptx_runner_service import execute_slides_json, RunResult
+    from app.services.thumbnail_service import generate_thumbnails
+
+    t0 = time.monotonic()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pptx_tmp = str(Path(tmp) / "slides.pptx")
+        update_studio_artifact(artifact_id, progress_message="正在渲染簡報範本…")
+
+        result, stderr = await execute_slides_json(spec_json, pptx_tmp)
+
+        if result != RunResult.SUCCESS:
+            logging.error(
+                "slides_renderer failed for artifact %d (%s): %s",
+                artifact_id, result, stderr,
+            )
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="簡報渲染失敗，請稍後重試。",
+            )
+            return
+
+        # Persist PPTX for download
+        persistent_dir = _THUMB_ROOT / str(artifact_id)
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        pptx_path = persistent_dir / "slides.pptx"
+        shutil.copy2(pptx_tmp, pptx_path)
+
+        update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
+        try:
+            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+        except Exception:
+            logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+            update_studio_artifact(
+                artifact_id,
+                status="error",
+                error_message="縮圖生成失敗，請稍後重試。",
+            )
+            return
+
+        # Optional Vision QA
+        from app.routers.settings import _runtime_settings
+        from app.services.vision_qa import visual_qa_check
+        from app.services.thumbnail_service import get_thumbnail_urls
+
+        if _runtime_settings.vision_model:
+            thumb_urls = get_thumbnail_urls(artifact_id)
+            thumb_paths = [_THUMB_ROOT / str(artifact_id) / Path(u).name for u in thumb_urls]
+            update_studio_artifact(artifact_id, progress_message="正在進行視覺品質檢查…")
+            issues = await visual_qa_check(
+                thumb_paths,
+                api_base_url=_runtime_settings.llm_api_base_url,
+                api_key=_runtime_settings.llm_api_key,
+                model=_runtime_settings.vision_model,
+            )
+            problem_count = sum(len(s.get("issues", [])) for s in issues)
+            if problem_count > 0:
+                logging.warning(
+                    "Vision QA found %d issue(s) in artifact %d: %s",
+                    problem_count, artifact_id, issues,
+                )
+
+        elapsed = time.monotonic() - t0
+        logging.info(
+            "slides_from_json artifact=%d done in %.1fs (renderer+thumbnails+qa)",
+            artifact_id, elapsed,
+        )
+        update_studio_artifact(artifact_id, status="done", progress_message="")
 
 
 async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:

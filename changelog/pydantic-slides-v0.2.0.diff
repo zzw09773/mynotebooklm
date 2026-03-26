@@ -1,0 +1,1414 @@
+commit 7226b448e2529c658ea00674444ef5dd01be6b97
+Author: AIA Assistant <aia@example.com>
+Date:   Thu Mar 26 02:37:00 2026 +0000
+
+    feat: add Pydantic models for slide schemas and implement slide rendering logic
+    
+    - Introduced Pydantic models for various slide layouts including Cover, Section Divider, Big Number, Card Grid, Dual Column, Process Flow, Content With Icon, Quote, Table, Chart, and Conclusion.
+    - Implemented a new script for rendering slides using PptxGenJS, including theme management and slide-specific rendering functions.
+    - Added utility functions for embedding icons into slides.
+    - Established a structure for handling slide data and generating presentations based on JSON input.
+
+diff --git a/.claude/plans/glimmering-roaming-teapot.md b/.claude/plans/glimmering-roaming-teapot.md
+new file mode 100644
+index 0000000..71bc3dc
+--- /dev/null
++++ b/.claude/plans/glimmering-roaming-teapot.md
+@@ -0,0 +1,326 @@
++# 簡報功能 JSON 中間層改造
++
++## Context
++
++NotebookLM 的簡報功能目前透過 LLM 直接生成 PptxGenJS JavaScript 程式碼，需要 4 層錯誤修正機制（Python 前處理 → JS 修正 → 相容性 shim → LLM 重試）。根本原因是讓 LLM 同時負責「內容決策」和「程式碼實作」。
++
++本計畫將簡報功能改造為 **JSON 中間層架構**：LLM 只負責產出結構化 JSON（版面類型、標題、要點），由確定性的模板引擎負責渲染成 PptxGenJS 程式碼，從根本消除程式碼生成錯誤。
++
++---
++
++## 現況評估摘要
++
++### 核心問題
++
++1. **4 層 shim 是架構警示**：Python 前處理 → JS regex 修正 → addText/addShape shim → LLM 重試
++2. **max_tokens=8192 偏低**：12 頁 × ~700 token/頁 ≈ 8400，容易截斷
++3. **無並行控制**：`asyncio.create_task()` 無 semaphore
++4. **`_fix_pptxgenjs_code` 未使用 slides_model**，修正 prompt 也缺少設計規則
++5. **無錯誤率追蹤**，無法量化改進效果
++
++### 現行版面類型（共 11 種，改造後需全部支援）
++
++| 版面 | 用途 | 渲染注意事項 |
++|------|------|-------------|
++| `cover` | 封面 | 固定佈局 |
++| `section_divider` | 章節分隔 | 固定佈局 |
++| `big_number` | 關鍵指標 | **1 個→超大字居中；2-3 個→卡片並排，動態 cardWidth** |
++| `dual_column` | 比較 | 固定左右分欄 |
++| `card_grid` | 並列卡片 | **3 個 vs 4 個卡片的 cardWidth 不同，需動態計算** |
++| `process_flow` | 流程步驟 | **3-5 個步驟的間距需動態調整** |
++| `content_with_icon` | 圖文交替 | 固定佈局 |
++| `quote_slide` | 金句 | 固定佈局 |
++| `table` | 表格 | 動態欄寬 |
++| `chart` | 圖表 | **僅當文件含具體數據時使用**（見 Step 1 說明） |
++| `conclusion` | 結尾 | 固定佈局 |
++
++---
++
++## 實作計畫
++
++### Step 1: 定義 Slide JSON Schema（Pydantic models）
++
++**新增檔案：** `backend/app/schemas/slides.py`
++
++定義以下 Pydantic models：
++
++- `CoverSlide` — layout="cover", title, subtitle
++- `SectionDividerSlide` — layout="section_divider", label, title, description
++- `BigNumberSlide` — layout="big_number", title, items: list[BigNumberItem(value, unit, label)]（min=1, max=3）
++- `CardGridSlide` — layout="card_grid", title, cards: list[CardItem(icon, title, description)]（min=2, max=4）
++- `DualColumnSlide` — layout="dual_column", title, left/right: DualColumnSide(icon, title, points)
++- `ProcessFlowSlide` — layout="process_flow", title, steps: list[ProcessStep(title, description)]（min=2, max=5）
++- `ContentWithIconSlide` — layout="content_with_icon", title, icon, blocks: list[ContentBlock(title, description)]
++- `QuoteSlide` — layout="quote_slide", quote, source
++- `TableSlide` — layout="table", title, headers, rows
++- `ChartSlide` — layout="chart", title, chart_type(BAR/PIE), labels, values
++- `ConclusionSlide` — layout="conclusion", title, summary, points: list[ConclusionPoint(text, icon="FaCheck")]（icon 有預設值，LLM 可省略但 renderer 仍會畫）
++
++使用 `Annotated[Union[...], Field(discriminator="layout")]` 做 discriminated union。
++
++頂層：`SlidesSpec(theme, narrative, slides: list[SlideData])`
++
++每個欄位都有 max_length 約束（標題≤15字、要點≤25字），min/max items 約束（slides: 8-12, cards: 2-4, steps: 2-5）。
++
++**chart 的特殊處理：**
++- ChartSlide 在 schema 中是 optional——它是 SlideData union 的一員，但 prompt 會明確指示「只有文件中包含具體數據時才使用 chart layout」
++- 如果文件純文字無數字，LLM 直接跳過 chart，使用其他 layout
++- 這避免了 LLM 為了湊版面而編造假數據的問題
++
++### Step 2: 重寫 SLIDES_PROMPT
++
++**修改檔案：** `backend/app/services/studio_service.py`（SLIDES_PROMPT 區塊）
++
++新 prompt 包含 4 個區塊：
++
++**區塊 A：色票對照表（~200 字）**
++
++LLM 需要知道每組色票適合什麼場景才能正確選擇：
++
++```
++色票選擇（根據文件主題選一）：
++| 名稱 | 適用場景 |
++| tech | 科技、AI、軟體、數位轉型 |
++| ocean | 環境、醫療、教育、公共政策 |
++| golden | 金融、商業、行銷、品牌策略 |
++| frost | 學術、研究、法律、白皮書 |
++| garden | 農業、食品、永續、ESG |
++| sports | 體育、賽事、健康、活力主題 |
++```
++
++**區塊 B：JSON schema 描述（每種 layout 的欄位說明）**
++
++不含座標，只描述語義欄位。特別標註：
++- `chart`：「只有文件中包含具體數據（數字、百分比、統計量）時才使用此 layout。若文件無明確數字資料，請選擇其他 layout。」
++
++**區塊 C：內容規則**
++- 首頁 cover、末頁 conclusion
++- 相鄰兩頁不可相同 layout，全簡報 ≥5 種不同 layout
++- 繁體中文、不編造數據
++- 標題≤15字、要點≤25字
++- 有明確數字 → 優先 big_number
++- 可用 icon 列表
++
++**區塊 D：3-4 頁 mini example（~400 字）**
++
++提供一個完整的 JSON output 範例，讓模型知道期望格式：
++
++```json
++{
++  "theme": "tech",
++  "narrative": "匯報",
++  "slides": [
++    {
++      "layout": "cover",
++      "title": "AI 導入成效報告",
++      "subtitle": "2026 Q1 季度回顧"
++    },
++    {
++      "layout": "big_number",
++      "title": "關鍵指標",
++      "items": [
++        {"value": "98%", "unit": "準確率", "label": "模型推論"},
++        {"value": "3.2x", "unit": "加速", "label": "處理速度"}
++      ]
++    },
++    {
++      "layout": "card_grid",
++      "title": "三大策略方向",
++      "cards": [
++        {"icon": "FaRocket", "title": "擴展部署", "description": "將服務推廣至五個部門"},
++        {"icon": "FaDatabase", "title": "資料整合", "description": "統一資料湖架構"},
++        {"icon": "FaUsers", "title": "人才培訓", "description": "培訓兩百名工程師"}
++      ]
++    },
++    {
++      "layout": "conclusion",
++      "title": "總結與展望",
++      "summary": "AI 導入已見初步成效",
++      "points": [
++        {"text": "模型準確率達 98%"},
++        {"text": "處理速度提升 3.2 倍"},
++        {"text": "下季度擴展至全公司", "icon": "FaRocket"}
++      ]
++    }
++  ]
++}
++```
++
++**預估 prompt 長度：** ~1200 字（含 example），比原本 ~2500 字減半。
++
++### Step 3: 新增 `_sanitize_json()` 清理函式
++
++**修改檔案：** `backend/app/services/studio_service.py`
++
++在 Pydantic 驗證前加入 `_sanitize_json(raw: str) -> str`，處理 LLM 產出 JSON 的三種常見錯誤：
++
++1. **Markdown code fence**：複用現有 `_strip_code_fence()`
++2. **Trailing comma**：`{"a": 1,}` → `{"a": 1}` — 用 regex `r',\s*([}\]])'` → `r'\1'`
++3. **未轉義換行符**：JSON string 中的裸 `\n` 需要變成 `\\n` — 用 regex 處理 `"..."` 內的 literal newline
++
++處理順序：strip_code_fence → trailing comma → unescaped newline → return
++
++### Step 4: 新增 JSON 驗證失敗時的 LLM 修正機制
++
++**修改檔案：** `backend/app/services/studio_service.py`
++
++新增 `_fix_slides_json(raw: str, validation_error: str) -> str`：
++
++當 Pydantic 驗證失敗時，將 validation error 餵回 LLM 做一次修正：
++
++```
++以下 JSON 簡報資料有驗證錯誤，請修正並只輸出修正後的完整 JSON：
++
++錯誤訊息：
++slides[3].cards[2].title: String should have at most 15 characters
++slides[5].layout: Input should be 'cover', 'big_number', ...
++
++原始 JSON：
++{...}
++```
++
++**與舊版 `_fix_pptxgenjs_code` 的差異：**
++- LLM 修 JSON 比修 JS 容易十倍——格式明確、錯誤訊息精準
++- 使用 `slides_model`（如已設定）
++- Validation error 天然包含「哪個欄位、什麼問題」，LLM 修正精確度極高
++- 修正後再次通過 `_sanitize_json` + Pydantic 驗證
++- 仍僅重試一次（避免迴圈）
++
++### Step 5: 抽取 `addIcon` 為共用模組 + 新增模板引擎 `slides_renderer.js`
++
++**新增檔案：** `backend/app/scripts/icon_utils.js`
++
++從 `pptx_runner.js:34-55` 抽取 `addIcon` 函式為獨立模組：
++
++```javascript
++// icon_utils.js
++const fs = require("fs");
++const path = require("path");
++const ICONS = JSON.parse(fs.readFileSync(path.join(__dirname, "../data/icon_registry.json"), "utf8"));
++
++function addIcon(sld, iconName, colorHex, x, y, w, h) {
++    // ... 現有邏輯（SVG path → base64 data URI → sld.addImage）
++}
++module.exports = { addIcon, ICONS };
++```
++
++`pptx_runner.js` 改為 `const { addIcon } = require("./icon_utils");`（向後相容）。
++
++**新增檔案：** `backend/app/scripts/slides_renderer.js`
++
++```
++Usage: node slides_renderer.js <slides.json> <output.pptx>
++```
++
++內部結構：
++- `const { addIcon } = require("./icon_utils");` — 共用 icon 邏輯
++- `THEMES` 物件：6 套色票的 hex 值（single source of truth）
++- `FONT` 常數："Microsoft JhengHei"
++- 11 個 render 函式（座標從現有 SLIDES_PROMPT 翻譯）
++- `RENDERERS` dispatch map
++- main：`JSON.parse` → iterate slides → dispatch → `pres.writeFile`
++
++**動態佈局的 render 函式重點：**
++
++`renderBigNumber(pres, theme, data)`：
++- `items.length === 1`：超大字居中 fontSize:100, x:0.5, y:1.4, w:9, h:2.2, align:center
++- `items.length === 2-3`：N 張等寬 cardW=2.7 卡片 (gap=0.45) 水平置中
++- 公式：`totalW = N * 2.7 + (N-1) * 0.45; startX = (10 - totalW) / 2`
++
++`renderCardGrid(pres, theme, data)`：
++- 同樣使用 `N * 2.7 + (N-1) * 0.45` 公式
++- 3 卡片 vs 4 卡片的 startX 不同
++
++`renderProcessFlow(pres, theme, data)`：
++- 步驟數 3-5，圓形半徑 circR=0.35，圓直徑 circD=0.7
++- 簡化公式：`startX = 0.5 + circR`（即 0.85，與原 prompt 一致，兩邊各留 0.5 margin）
++- 間距：`gap = (9.0 - N * circD) / (N - 1)`
++- 每個圓心 x：`cx = startX + i * (circD + gap)`
++- 連接線 y:1.85 也需配合間距
++
++安全性：純 JSON input → `JSON.parse` → PptxGenJS API。不使用 vm sandbox、不執行動態程式碼。使用 `create_subprocess_exec`（非 shell）。
++
++### Step 6: 更新 `pptx_runner_service.py`
++
++**修改檔案：** `backend/app/services/pptx_runner_service.py`
++
++新增 `execute_slides_json(slides_json, output_path, timeout)`：
++- 將 JSON 寫入 temp file
++- `asyncio.create_subprocess_exec("node", renderer_script, json_file, output_path)`
++- 回傳 `(RunResult, stderr)`
++- renderer 不會有 syntax error（不執行動態碼），所以只有 SUCCESS 或 RUNTIME_ERROR
++
++同時更新 `pptx_runner.js` 的 `addIcon` import：
++- `const { addIcon } = require("./icon_utils");`
++- 移除 `pptx_runner.js` 中的 `addIcon` 函式定義和 ICONS 載入（已移至 icon_utils.js）
++
++### Step 7: 更新 `studio_service.py` 的 slides 路徑
++
++**修改檔案：** `backend/app/services/studio_service.py`
++
++slides 處理流程改為：
++
++```
++1. LLM streaming → raw text
++2. _sanitize_json(raw) — 清理 code fence、trailing comma、unescaped newline
++3. SlidesSpec.model_validate_json(sanitized)
++4. 若驗證失敗：
++   a. 提取 Pydantic ValidationError 訊息
++   b. _fix_slides_json(sanitized, error_msg) → LLM 修正一次
++   c. _sanitize_json(fixed) → 再次驗證
++   d. 若仍失敗 → status="error" + 回傳具體驗證錯誤
++5. 驗證通過 → update_studio_artifact(content_json=spec.model_dump_json())
++6. asyncio.create_task(_generate_slides_from_json(artifact_id, json_str))
++```
++
++`_generate_slides_from_json`：
++- 類似現有 `_generate_slides_pptx_bg` 但調用 `execute_slides_json`
++- 不需要舊的 `_fix_pptxgenjs_code`
++- 仍執行縮圖生成 + Vision QA
++
++### Step 8: 保留舊路徑 + 加入並行控制與指標
++
++- `pptx_runner.js`（改為 import icon_utils）+ `_preprocess_code` + shims **保留**
++- `execute_pptxgenjs` 保留
++- 待 JSON 路徑穩定後，下一版本再移除
++
++並行控制：
++- `_SLIDES_SEMAPHORE = asyncio.Semaphore(2)` 在 `_generate_slides_from_json` 開頭
++- `time.monotonic()` 計時 + logging 記錄生成時間
++
++---
++
++## 關鍵檔案清單
++
++| 操作 | 檔案 |
++|------|------|
++| **新增** | `backend/app/schemas/slides.py` — Pydantic JSON schema |
++| **新增** | `backend/app/scripts/icon_utils.js` — 從 pptx_runner.js 抽取的共用 addIcon |
++| **新增** | `backend/app/scripts/slides_renderer.js` — 確定性模板引擎（11 個 render 函式） |
++| **修改** | `backend/app/services/studio_service.py` — 新 prompt + _sanitize_json + _fix_slides_json + JSON 路徑 + semaphore |
++| **修改** | `backend/app/services/pptx_runner_service.py` — 新增 `execute_slides_json` |
++| **修改** | `backend/app/scripts/pptx_runner.js` — addIcon 改為 import icon_utils（向後相容） |
++| **保留** | 舊路徑所有檔案（暫不刪除） |
++
++---
++
++## 驗證方式
++
++### Unit Tests
++- **Schema**：每種 layout 的 Pydantic model validate/reject 測試
++- **_sanitize_json**：code fence / trailing comma / unescaped newline 各一個 test case
++
++### Renderer Tests
++- 每種 layout 準備一個 fixture JSON，確認 `slides_renderer.js` 能成功產出 PPTX
++- **動態佈局重點測試**：
++  - `big_number`：分別測 1 個、2 個、3 個 items
++  - `card_grid`：分別測 2 個、3 個、4 個 cards
++  - `process_flow`：分別測 3 個、4 個、5 個 steps
++- `addIcon` 在 `icon_utils.js` 中的 icon 嵌入功能正常
++
++### 端對端
++- 用相同文件生成 10 次簡報，統計：
++  - JSON 首次驗證通過率（預期 > 90%）
++  - 經 LLM 修正後通過率（預期 > 98%）
++  - 總生成時間
++  - 視覺品質（模板引擎座標精確度 > LLM 自由生成）
+diff --git a/backend/app/schemas/__init__.py b/backend/app/schemas/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/backend/app/schemas/slides.py b/backend/app/schemas/slides.py
+new file mode 100644
+index 0000000..25af0ca
+--- /dev/null
++++ b/backend/app/schemas/slides.py
+@@ -0,0 +1,183 @@
++"""Pydantic models for the JSON slides intermediate layer."""
++
++from typing import Annotated, Literal, Union
++
++from pydantic import BaseModel, Field
++
++
++# ---------------------------------------------------------------------------
++# Layout 1: Cover
++# ---------------------------------------------------------------------------
++
++class CoverSlide(BaseModel):
++    layout: Literal["cover"]
++    title: str = Field(max_length=15)
++    subtitle: str | None = None
++
++
++# ---------------------------------------------------------------------------
++# Layout 2: Section Divider
++# ---------------------------------------------------------------------------
++
++class SectionDividerSlide(BaseModel):
++    layout: Literal["section_divider"]
++    label: str | None = None
++    title: str = Field(max_length=15)
++    description: str | None = None
++
++
++# ---------------------------------------------------------------------------
++# Layout 3: Big Number
++# ---------------------------------------------------------------------------
++
++class BigNumberItem(BaseModel):
++    value: str
++    unit: str | None = None
++    label: str | None = None
++
++
++class BigNumberSlide(BaseModel):
++    layout: Literal["big_number"]
++    title: str = Field(max_length=15)
++    items: list[BigNumberItem] = Field(min_length=1, max_length=3)
++
++
++# ---------------------------------------------------------------------------
++# Layout 4: Card Grid
++# ---------------------------------------------------------------------------
++
++class CardItem(BaseModel):
++    icon: str | None = None
++    title: str = Field(max_length=15)
++    description: str | None = Field(default=None, max_length=40)
++
++
++class CardGridSlide(BaseModel):
++    layout: Literal["card_grid"]
++    title: str = Field(max_length=15)
++    cards: list[CardItem] = Field(min_length=2, max_length=4)
++
++
++# ---------------------------------------------------------------------------
++# Layout 5: Dual Column
++# ---------------------------------------------------------------------------
++
++class DualColumnSide(BaseModel):
++    icon: str | None = None
++    title: str = Field(max_length=15)
++    points: list[Annotated[str, Field(max_length=25)]]
++
++
++class DualColumnSlide(BaseModel):
++    layout: Literal["dual_column"]
++    title: str = Field(max_length=15)
++    left: DualColumnSide
++    right: DualColumnSide
++
++
++# ---------------------------------------------------------------------------
++# Layout 6: Process Flow
++# ---------------------------------------------------------------------------
++
++class ProcessStep(BaseModel):
++    title: str = Field(max_length=15)
++    description: str | None = Field(default=None, max_length=40)
++
++
++class ProcessFlowSlide(BaseModel):
++    layout: Literal["process_flow"]
++    title: str = Field(max_length=15)
++    steps: list[ProcessStep] = Field(min_length=2, max_length=5)
++
++
++# ---------------------------------------------------------------------------
++# Layout 7: Content With Icon
++# ---------------------------------------------------------------------------
++
++class ContentBlock(BaseModel):
++    title: str = Field(max_length=15)
++    description: str = Field(max_length=60)
++
++
++class ContentWithIconSlide(BaseModel):
++    layout: Literal["content_with_icon"]
++    title: str = Field(max_length=15)
++    icon: str | None = None
++    blocks: list[ContentBlock] = Field(min_length=1, max_length=4)
++
++
++# ---------------------------------------------------------------------------
++# Layout 8: Quote
++# ---------------------------------------------------------------------------
++
++class QuoteSlide(BaseModel):
++    layout: Literal["quote_slide"]
++    quote: str = Field(max_length=80)
++    source: str | None = Field(default=None, max_length=30)
++
++
++# ---------------------------------------------------------------------------
++# Layout 9: Table
++# ---------------------------------------------------------------------------
++
++class TableSlide(BaseModel):
++    layout: Literal["table"]
++    title: str = Field(max_length=15)
++    headers: list[str] = Field(min_length=2, max_length=8)
++    rows: list[list[str]] = Field(min_length=1, max_length=12)
++
++
++# ---------------------------------------------------------------------------
++# Layout 10: Chart
++# ---------------------------------------------------------------------------
++
++class ChartSlide(BaseModel):
++    layout: Literal["chart"]
++    title: str = Field(max_length=15)
++    chart_type: Literal["BAR", "PIE"]
++    labels: list[str] = Field(min_length=2, max_length=8)
++    values: list[float] = Field(min_length=2, max_length=8)
++
++
++# ---------------------------------------------------------------------------
++# Layout 11: Conclusion
++# ---------------------------------------------------------------------------
++
++class ConclusionPoint(BaseModel):
++    text: str = Field(max_length=25)
++    icon: str = "FaCheck"
++
++
++class ConclusionSlide(BaseModel):
++    layout: Literal["conclusion"]
++    title: str = Field(max_length=15)
++    summary: str | None = Field(default=None, max_length=40)
++    points: list[ConclusionPoint] = Field(min_length=1, max_length=5)
++
++
++# ---------------------------------------------------------------------------
++# Top-level discriminated union and spec
++# ---------------------------------------------------------------------------
++
++SlideData = Annotated[
++    Union[
++        CoverSlide,
++        SectionDividerSlide,
++        BigNumberSlide,
++        CardGridSlide,
++        DualColumnSlide,
++        ProcessFlowSlide,
++        ContentWithIconSlide,
++        QuoteSlide,
++        TableSlide,
++        ChartSlide,
++        ConclusionSlide,
++    ],
++    Field(discriminator="layout"),
++]
++
++
++class SlidesSpec(BaseModel):
++    theme: Literal["tech", "ocean", "golden", "frost", "garden", "sports"] = "tech"
++    narrative: str | None = None
++    slides: list[SlideData] = Field(min_length=10, max_length=18)
+diff --git a/backend/app/scripts/icon_utils.js b/backend/app/scripts/icon_utils.js
+new file mode 100644
+index 0000000..91134c5
+--- /dev/null
++++ b/backend/app/scripts/icon_utils.js
+@@ -0,0 +1,42 @@
++"use strict";
++
++const fs = require("fs");
++const path = require("path");
++
++const ICON_REGISTRY_PATH = path.join(__dirname, "../data/icon_registry.json");
++const ICONS = JSON.parse(fs.readFileSync(ICON_REGISTRY_PATH, "utf8"));
++
++/**
++ * Embed a react-icon as an SVG image into a slide.
++ * @param {object} sld - PptxGenJS slide object
++ * @param {string} iconName - Icon name, e.g. "FaRocket"
++ * @param {string} colorHex - Fill color with or without '#', e.g. "0066FF" or "#0066FF"
++ * @param {number} x - X position in inches
++ * @param {number} y - Y position in inches
++ * @param {number} w - Width in inches
++ * @param {number} h - Height in inches
++ */
++function addIcon(sld, iconName, colorHex, x, y, w, h) {
++    const entry = ICONS[iconName];
++    if (!entry) {
++        console.error(`[icon_utils] Unknown icon: ${iconName}`);
++        return;
++    }
++    // Guard: colorHex might be null, undefined, or a non-string (e.g. a number)
++    const colorStr = (colorHex == null) ? "000000" : String(colorHex).replace(/^#/, "");
++    const color = `#${colorStr}`;
++    const pathEls = entry.paths
++        .map((d) => `<path d="${d}" fill="${color}"/>`)
++        .join("");
++    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${entry.viewBox}">${pathEls}</svg>`;
++    const b64 = Buffer.from(svg).toString("base64");
++    sld.addImage({
++        data: `data:image/svg+xml;base64,${b64}`,
++        x,
++        y,
++        w,
++        h,
++    });
++}
++
++module.exports = { addIcon, ICONS };
+diff --git a/backend/app/scripts/pptx_runner.js b/backend/app/scripts/pptx_runner.js
+index 8771f83..a896863 100644
+--- a/backend/app/scripts/pptx_runner.js
++++ b/backend/app/scripts/pptx_runner.js
+@@ -13,46 +13,9 @@
+ 
+ const vm = require("vm");
+ const fs = require("fs");
+-const path = require("path");
+ 
+ const PptxGenJS = require("pptxgenjs");
+-
+-// Load icon registry (SVG path data extracted from react-icons source)
+-const ICON_REGISTRY_PATH = path.join(__dirname, "../data/icon_registry.json");
+-const ICONS = JSON.parse(fs.readFileSync(ICON_REGISTRY_PATH, "utf8"));
+-
+-/**
+- * Embed a react-icon as an SVG image into a slide.
+- * @param {object} sld - PptxGenJS slide object
+- * @param {string} iconName - Icon name, e.g. "FaRocket"
+- * @param {string} colorHex - Fill color with or without '#', e.g. "0066FF" or "#0066FF"
+- * @param {number} x - X position in inches
+- * @param {number} y - Y position in inches
+- * @param {number} w - Width in inches
+- * @param {number} h - Height in inches
+- */
+-function addIcon(sld, iconName, colorHex, x, y, w, h) {
+-    const entry = ICONS[iconName];
+-    if (!entry) {
+-        console.error(`[pptx_runner] Unknown icon: ${iconName}`);
+-        return;
+-    }
+-    // Guard: LLM may pass null, undefined, or a non-string (e.g. a number)
+-    const colorStr = (colorHex == null) ? "000000" : String(colorHex).replace(/^#/, "");
+-    const color = `#${colorStr}`;
+-    const pathEls = entry.paths
+-        .map((d) => `<path d="${d}" fill="${color}"/>`)
+-        .join("");
+-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${entry.viewBox}">${pathEls}</svg>`;
+-    const b64 = Buffer.from(svg).toString("base64");
+-    sld.addImage({
+-        data: `data:image/svg+xml;base64,${b64}`,
+-        x,
+-        y,
+-        w,
+-        h,
+-    });
+-}
++const { addIcon } = require("./icon_utils");
+ 
+ // ── Main ──────────────────────────────────────────────────────
+ 
+diff --git a/backend/app/scripts/slides_renderer.js b/backend/app/scripts/slides_renderer.js
+new file mode 100644
+index 0000000..5af4c6f
+--- /dev/null
++++ b/backend/app/scripts/slides_renderer.js
+@@ -0,0 +1,358 @@
++"use strict";
++
++const fs = require("fs");
++const PptxGenJS = require("pptxgenjs");
++const { addIcon } = require("./icon_utils");
++
++const THEMES = {
++    tech:   { bg:"1E1E1E", accent:"0066FF", title:"FFFFFF", text:"CCCCCC", muted:"888888", cardBg:"2A2A2A" },
++    ocean:  { bg:"1A2332", accent:"2D8B8B", title:"F1FAEE", text:"A8DADC", muted:"5A8A8A", cardBg:"243040" },
++    golden: { bg:"4A403A", accent:"F4A900", title:"D4B896", text:"D4B896", muted:"C1666B", cardBg:"5A4E47" },
++    frost:  { bg:"FAFAFA", accent:"4A6FA5", title:"1A2332", text:"334155", muted:"909090", cardBg:"D4E4F7" },
++    garden: { bg:"F5F3ED", accent:"4A7C59", title:"333333", text:"555555", muted:"B7472A", cardBg:"EBE9E1" },
++    sports: { bg:"1B1F3B", accent:"E63946", title:"FFFFFF", text:"D0D0D0", muted:"6C7A96", cardBg:"252A4A" },
++};
++const FONT = "Microsoft JhengHei";
++
++function addSlide(pres, theme) {
++    const sld = pres.addSlide();
++    sld.background = { color: theme.bg };
++    return { sld, t: theme };
++}
++
++function addHeader(sld, t, titleText) {
++    // Accent top bar
++    sld.addShape("rect", { x: 0, y: 0, w: 10, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++    // Title text
++    sld.addText(titleText, { x: 0.5, y: 0.12, w: 9, h: 0.6, fontSize: 24, bold: true, color: t.title, fontFace: FONT, shrinkText: true });
++}
++
++function renderCover(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    // Accent top bar
++    sld.addShape("rect", { x: 0, y: 0, w: 10, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++    // Left decoration line
++    sld.addShape("rect", { x: 0.5, y: 1.5, w: 0.07, h: 2.4, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++    // Main title
++    sld.addText(data.title, { x: 0.85, y: 1.5, w: 8.5, h: 1.1, fontSize: 40, bold: true, color: t.title, fontFace: FONT, shrinkText: true });
++    // Subtitle (if present)
++    if (data.subtitle) {
++        sld.addText(data.subtitle, { x: 0.85, y: 2.85, w: 8.5, h: 0.6, fontSize: 18, color: t.muted, fontFace: FONT, shrinkText: true });
++    }
++    // Bottom-right block
++    sld.addShape("rect", { x: 8.8, y: 4.6, w: 1, h: 0.8, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++}
++
++function renderSectionDivider(pres, theme, data) {
++    // Section divider uses accent as background
++    const sld = pres.addSlide();
++    sld.background = { color: theme.accent };
++    // Label (if present)
++    if (data.label) {
++        sld.addText(data.label, { x: 0.8, y: 1.2, w: 8.4, h: 0.4, fontSize: 14, color: theme.bg, charSpacing: 4, fontFace: FONT, shrinkText: true });
++    }
++    // Main title
++    sld.addText(data.title, { x: 0.8, y: 1.8, w: 8.4, h: 1.0, fontSize: 36, color: "FFFFFF", bold: true, fontFace: FONT, shrinkText: true });
++    // Description (if present)
++    if (data.description) {
++        sld.addText(data.description, { x: 0.8, y: 3.3, w: 8.4, h: 0.6, fontSize: 16, color: "FFFFFF", fontFace: FONT, shrinkText: true });
++    }
++}
++
++function renderBigNumber(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    addHeader(sld, t, data.title);
++    const items = data.items;
++
++    if (items.length === 1) {
++        sld.addText(items[0].value, { x: 0.5, y: 1.4, w: 9, h: 2.2, fontSize: 100, bold: true, color: t.accent, align: "center", fontFace: FONT, shrinkText: true });
++        if (items[0].unit) {
++            sld.addText(items[0].unit, { x: 0.5, y: 3.7, w: 9, h: 0.4, fontSize: 18, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
++        }
++        if (items[0].label) {
++            sld.addText(items[0].label, { x: 0.5, y: 4.15, w: 9, h: 0.4, fontSize: 14, color: t.muted, align: "center", fontFace: FONT, shrinkText: true });
++        }
++    } else {
++        const N = items.length;
++        const cardW = 2.7;
++        const gap = 0.45;
++        const totalW = N * cardW + (N - 1) * gap;
++        const startX = (10 - totalW) / 2;
++        for (let i = 0; i < N; i++) {
++            const item = items[i];
++            const cx = startX + i * (cardW + gap);
++            // Card background
++            sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 3.6, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
++            // Accent top
++            sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 0.08, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++            // Value
++            sld.addText(item.value, { x: cx + 0.1, y: 1.5, w: cardW - 0.2, h: 1.2, fontSize: 52, bold: true, color: t.accent, align: "center", fontFace: FONT, shrinkText: true });
++            // Unit
++            if (item.unit) {
++                sld.addText(item.unit, { x: cx + 0.1, y: 2.75, w: cardW - 0.2, h: 0.4, fontSize: 14, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
++            }
++            // Label
++            if (item.label) {
++                sld.addText(item.label, { x: cx + 0.1, y: 3.2, w: cardW - 0.2, h: 0.4, fontSize: 13, color: t.muted, align: "center", fontFace: FONT, shrinkText: true });
++            }
++        }
++    }
++}
++
++function renderCardGrid(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    addHeader(sld, t, data.title);
++    const N = data.cards.length;
++    const cardW = 2.7;
++    const gap = 0.45;
++    const totalW = N * cardW + (N - 1) * gap;
++    const startX = (10 - totalW) / 2;
++    for (let i = 0; i < N; i++) {
++        const card = data.cards[i];
++        const cx = startX + i * (cardW + gap);
++        // Card background
++        sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 3.6, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
++        // Accent top
++        sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 0.08, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++        // Icon
++        if (card.icon) {
++            addIcon(sld, card.icon, "#" + t.accent, cx + (cardW - 0.45) / 2, 1.35, 0.45, 0.45);
++        }
++        // Title
++        sld.addText(card.title, { x: cx + 0.1, y: 2.0, w: cardW - 0.2, h: 0.55, fontSize: 16, bold: true, color: t.title, align: "center", fontFace: FONT, shrinkText: true });
++        // Description
++        if (card.description) {
++            sld.addText(card.description, { x: cx + 0.1, y: 2.6, w: cardW - 0.2, h: 1.9, fontSize: 12, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
++        }
++    }
++}
++
++function renderDualColumn(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    addHeader(sld, t, data.title);
++    const sides = [
++        { side: data.left, x: 0.4 },
++        { side: data.right, x: 5.25 },
++    ];
++    for (const { side, x } of sides) {
++        if (!side) continue;
++        // Card background
++        sld.addShape("rect", { x, y: 1.15, w: 4.35, h: 3.6, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
++        // Accent top
++        sld.addShape("rect", { x, y: 1.15, w: 4.35, h: 0.08, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++        // Icon
++        if (side.icon) {
++            addIcon(sld, side.icon, "#" + t.accent, x + 0.15, 1.35, 0.6, 0.6);
++        }
++        // Title
++        sld.addText(side.title, { x: x + 0.15, y: 2.1, w: 4.05, h: 0.55, fontSize: 18, bold: true, color: t.title, fontFace: FONT, shrinkText: true });
++        // Points
++        if (side.points) {
++            for (let j = 0; j < side.points.length; j++) {
++                sld.addText("• " + side.points[j], { x: x + 0.15, y: 2.75 + j * 0.45, w: 4.05, h: 0.4, fontSize: 13, color: t.text, fontFace: FONT, shrinkText: true });
++            }
++        }
++    }
++    // VS label in center
++    sld.addText("VS", { x: 4.55, y: 2.3, w: 0.9, h: 0.7, fontSize: 20, bold: true, color: t.accent, align: "center", fontFace: FONT, shrinkText: true });
++}
++
++function renderProcessFlow(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    addHeader(sld, t, data.title);
++    const N = data.steps.length;
++    const circR = 0.35;
++    const circD = circR * 2; // 0.7
++    const startX = 0.5 + circR; // 0.85 (circle center x of first step)
++    const gap = (9.0 - N * circD) / (N - 1); // space between circles
++
++    for (let i = 0; i < N; i++) {
++        const step = data.steps[i];
++        const cx = startX + i * (circD + gap); // circle center x
++        // Connector line between circles (not for last step)
++        if (i < N - 1) {
++            const lineX = cx + circR;
++            const lineW = gap;
++            sld.addShape("rect", { x: lineX, y: 1.815, w: lineW, h: 0.07, fill: { color: t.muted }, line: { color: t.muted, size: 0 } });
++        }
++        // Circle
++        sld.addShape("ellipse", { x: cx - circR, y: 1.15, w: circD, h: circD, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++        // Step number
++        sld.addText(String(i + 1), { x: cx - circR, y: 1.15, w: circD, h: circD, fontSize: 16, bold: true, color: "FFFFFF", align: "center", valign: "middle", fontFace: FONT, shrinkText: true });
++        // Step title
++        sld.addText(step.title, { x: cx - 0.6, y: 2.5, w: 1.2, h: 0.5, fontSize: 14, bold: true, color: t.title, align: "center", fontFace: FONT, shrinkText: true });
++        // Step description
++        if (step.description) {
++            sld.addText(step.description, { x: cx - 0.6, y: 2.95, w: 1.2, h: 0.9, fontSize: 11, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
++        }
++    }
++}
++
++function renderContentWithIcon(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    addHeader(sld, t, data.title);
++    // Left icon
++    const iconName = data.icon || (data.blocks && data.blocks[0] && data.blocks[0].icon) || null;
++    if (iconName) {
++        addIcon(sld, iconName, "#" + t.accent, 0.5, 1.4, 0.9, 0.9);
++    }
++    // Vertical separator line
++    sld.addShape("rect", { x: 1.7, y: 1.3, w: 0.04, h: 3.2, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++    // Blocks on the right
++    if (data.blocks) {
++        for (let i = 0; i < data.blocks.length; i++) {
++            const block = data.blocks[i];
++            const yPos = 1.4 + i * 1.1;
++            sld.addText(block.title, { x: 2.0, y: yPos, w: 7.5, h: 0.45, fontSize: 16, bold: true, color: t.title, fontFace: FONT, shrinkText: true });
++            sld.addText(block.description, { x: 2.0, y: yPos + 0.45, w: 7.5, h: 0.55, fontSize: 13, color: t.text, fontFace: FONT, shrinkText: true });
++        }
++    }
++}
++
++function renderQuote(pres, theme, data) {
++    // Quote slide uses cardBg as background
++    const sld = pres.addSlide();
++    sld.background = { color: theme.cardBg };
++    // Quote mark
++    sld.addText("\u201C", { x: 0.5, y: 0.3, w: 2, h: 1.5, fontSize: 80, color: theme.accent, fontFace: FONT, shrinkText: true });
++    // Quote text
++    sld.addText(data.quote, { x: 1.2, y: 1.7, w: 7.6, h: 1.8, fontSize: 24, italic: true, color: theme.title, align: "center", fontFace: FONT, shrinkText: true });
++    // Separator line
++    sld.addShape("rect", { x: 3.5, y: 3.9, w: 3, h: 0.04, fill: { color: theme.accent }, line: { color: theme.accent, size: 0 } });
++    // Source (if present)
++    if (data.source) {
++        sld.addText("— " + data.source, { x: 1.2, y: 4.1, w: 7.6, h: 0.4, fontSize: 14, color: theme.muted, align: "center", fontFace: FONT, shrinkText: true });
++    }
++}
++
++function renderTable(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    addHeader(sld, t, data.title);
++    // Build rows array for PptxGenJS addTable
++    // Header row
++    const headerRow = data.headers.map(h => ({
++        text: h,
++        options: { bold: true, color: "FFFFFF", fill: { color: t.accent }, fontSize: 13, fontFace: FONT }
++    }));
++    // Data rows (alternating fill: cardBg / bg)
++    const dataRows = data.rows.map((row, ri) =>
++        row.map(cell => ({
++            text: cell,
++            options: { color: t.text, fill: { color: ri % 2 === 0 ? t.cardBg : t.bg }, fontSize: 12, fontFace: FONT }
++        }))
++    );
++    sld.addTable([headerRow, ...dataRows], {
++        x: 0.5,
++        y: 1.1,
++        w: 9,
++        colW: Array(data.headers.length).fill(9 / data.headers.length),
++        border: { type: "none" }
++    });
++}
++
++function renderChart(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    addHeader(sld, t, data.title);
++    const chartData = [{ name: data.title, labels: data.labels, values: data.values }];
++    try {
++        if (data.chart_type === "BAR") {
++            sld.addChart(pres.ChartType.bar, chartData, {
++                x: 0.8, y: 1.2, w: 8.4, h: 3.8,
++                barDir: "col",
++                chartColors: [t.accent],
++                showValue: true,
++                valAxisLabelFontSize: 11,
++                catAxisLabelFontSize: 11,
++                dataLabelFontSize: 11,
++                dataLabelColor: t.title,
++            });
++        } else {
++            // PIE
++            sld.addChart(pres.ChartType.pie, chartData, {
++                x: 2.5, y: 1.2, w: 5, h: 3.8,
++                showPercent: true,
++                chartColors: [t.accent, t.muted, t.text, "4CAF50", "FF9800", "9C27B0", "F44336", "2196F3"],
++                dataLabelFontSize: 12,
++            });
++        }
++    } catch (err) {
++        // Fallback: render chart data as a table if addChart fails
++        console.error(`[slides_renderer] renderChart failed (${err.message}) — falling back to text`);
++        const rows = data.labels.map((label, i) => [
++            { text: label, options: { color: t.text, fontSize: 13, fontFace: FONT } },
++            { text: String(data.values[i] || ""), options: { color: t.accent, fontSize: 13, bold: true, fontFace: FONT } },
++        ]);
++        sld.addTable(rows, { x: 1.5, y: 1.3, w: 7, colW: [5, 2] });
++    }
++}
++
++function renderConclusion(pres, theme, data) {
++    const { sld, t } = addSlide(pres, theme);
++    // Accent top bar (same as addHeader's bar)
++    sld.addShape("rect", { x: 0, y: 0, w: 10, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++    // Larger title (don't call addHeader, implement directly)
++    sld.addText(data.title, { x: 0.5, y: 0.5, w: 9, h: 0.8, fontSize: 28, bold: true, color: t.title, fontFace: FONT, shrinkText: true });
++    // Accent line
++    sld.addShape("rect", { x: 0.5, y: 1.35, w: 2, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++    // Summary (if present)
++    if (data.summary) {
++        sld.addText(data.summary, { x: 0.5, y: 1.55, w: 9, h: 0.55, fontSize: 16, italic: true, color: t.accent, fontFace: FONT, shrinkText: true });
++    }
++    // Points
++    if (data.points) {
++        for (let i = 0; i < data.points.length; i++) {
++            const point = data.points[i];
++            const yPos = 1.9 + i * 1.0;
++            // Point card background
++            sld.addShape("rect", { x: 0.5, y: yPos, w: 9, h: 0.75, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.08 });
++            // Icon
++            addIcon(sld, point.icon || "FaCheck", "#" + t.accent, 0.65, yPos + 0.15, 0.4, 0.4);
++            // Point text
++            sld.addText(point.text, { x: 1.2, y: yPos + 0.15, w: 8.1, h: 0.45, fontSize: 15, color: t.title, fontFace: FONT, shrinkText: true });
++        }
++    }
++}
++
++const RENDERERS = {
++    cover: renderCover,
++    section_divider: renderSectionDivider,
++    big_number: renderBigNumber,
++    card_grid: renderCardGrid,
++    dual_column: renderDualColumn,
++    process_flow: renderProcessFlow,
++    content_with_icon: renderContentWithIcon,
++    quote_slide: renderQuote,
++    table: renderTable,
++    chart: renderChart,
++    conclusion: renderConclusion,
++};
++
++// Main
++const jsonFile = process.argv[2];
++const outputPath = process.argv[3];
++if (!jsonFile || !outputPath) {
++    console.error("Usage: node slides_renderer.js <slides.json> <output.pptx>");
++    process.exit(1);
++}
++
++const spec = JSON.parse(fs.readFileSync(jsonFile, "utf8"));
++const theme = THEMES[spec.theme] || THEMES.tech;
++const pres = new PptxGenJS();
++pres.defineLayout({ name: "16x9", width: 10, height: 5.625 });
++pres.layout = "16x9";
++
++for (const slideData of spec.slides) {
++    const renderer = RENDERERS[slideData.layout];
++    if (!renderer) {
++        console.error(`[slides_renderer] Unknown layout: ${slideData.layout} — skipping`);
++        continue;
++    }
++    renderer(pres, theme, slideData);
++}
++
++pres.writeFile({ fileName: outputPath })
++    .then(() => process.exit(0))
++    .catch((err) => {
++        console.error(`[slides_renderer] writeFile failed: ${err.message}`);
++        process.exit(1);
++    });
+diff --git a/backend/app/services/pptx_runner_service.py b/backend/app/services/pptx_runner_service.py
+index 18e1930..1763398 100644
+--- a/backend/app/services/pptx_runner_service.py
++++ b/backend/app/services/pptx_runner_service.py
+@@ -112,6 +112,70 @@ def _preprocess_code(code: str) -> str:
+     return code
+ 
+ 
++_RENDERER_SCRIPT = Path(__file__).parent.parent / "scripts" / "slides_renderer.js"
++
++
++async def execute_slides_json(
++    slides_json: str, output_path: str, timeout: int = 120
++) -> tuple[RunResult, str]:
++    """
++    Render a validated SlidesSpec JSON string to a .pptx file using the
++    deterministic slides_renderer.js template engine.
++
++    Unlike execute_pptxgenjs, this path does NOT use a vm sandbox or execute
++    dynamic code — it feeds pure JSON to a fixed renderer, so SYNTAX_ERROR
++    is never returned (only SUCCESS or RUNTIME_ERROR).
++
++    Args:
++        slides_json: Serialised SlidesSpec JSON string.
++        output_path: Destination path for the generated PPTX.
++        timeout:     Max seconds to wait for Node.js subprocess.
++
++    Returns:
++        (RunResult, stderr_text) tuple.
++    """
++    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False, encoding="utf-8") as f:
++        f.write(slides_json)
++        json_file = f.name
++
++    try:
++        proc = await asyncio.create_subprocess_exec(
++            "node",
++            str(_RENDERER_SCRIPT),
++            json_file,
++            output_path,
++            stdout=asyncio.subprocess.PIPE,
++            stderr=asyncio.subprocess.PIPE,
++            env={**__import__("os").environ, "NODE_PATH": "/usr/lib/node_modules"},
++        )
++        try:
++            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
++        except asyncio.TimeoutError:
++            proc.kill()
++            log.error("slides_renderer timed out after %ds", timeout)
++            return RunResult.TIMEOUT, f"Timed out after {timeout}s"
++
++        stderr_text = stderr.decode(errors="replace")
++
++        if proc.returncode != 0:
++            log.error("slides_renderer failed (exit %d): %s", proc.returncode, stderr_text)
++            return RunResult.RUNTIME_ERROR, stderr_text
++
++        if not Path(output_path).exists():
++            log.error("slides_renderer returned 0 but output file missing: %s", output_path)
++            return RunResult.RUNTIME_ERROR, "Output file not created"
++
++        log.info(
++            "slides_renderer produced %s (%d bytes)",
++            output_path,
++            Path(output_path).stat().st_size,
++        )
++        return RunResult.SUCCESS, ""
++
++    finally:
++        Path(json_file).unlink(missing_ok=True)
++
++
+ async def execute_pptxgenjs(
+     code: str, output_path: str, timeout: int = 60
+ ) -> tuple[RunResult, str]:
+diff --git a/backend/app/services/studio_service.py b/backend/app/services/studio_service.py
+index a8c6f5d..9de0a81 100644
+--- a/backend/app/services/studio_service.py
++++ b/backend/app/services/studio_service.py
+@@ -39,61 +39,68 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
+ 5. 輸出必須是合法的 JSON。
+ """
+ 
+-SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 PptxGenJS 程式碼。
+-
+-環境：pres已建立。addIcon(sld,name,colorHex,x,y,w,h)可用。畫布10"×5.625"。禁用require/import/writeFile/fs/process/module/exports。
+-Icon可用：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog MdDashboard MdAnalytics MdSecurity MdTrendingUp
+-
+-敘事弧線（擇一）：匯報:背景→發現→數據→啟示→結論 | 提案:痛點→方案→佐證→行動 | 分析:定義→拆解→利弊→建議 | 教學:重要性→概念→步驟→回顧
+-
+-版面選擇（相鄰不重複，≥5種）：
+-1-3個數字→big_number | 比較→dual_column | 3-4並列→card_grid | 步驟→process_flow | 數據→table | 趨勢佔比→chart | 金句→quote_slide | 章節→section_divider | 其餘→content_with_icon
+-
+-色票 bg/accent/title/text/muted/cardBg（根據主題選一）：
+-tech:1E1E1E/0066FF/FFFFFF/CCCCCC/888888/2A2A2A
+-ocean:1A2332/2D8B8B/F1FAEE/A8DADC/5A8A8A/243040
+-golden:4A403A/F4A900/D4B896/D4B896/C1666B/5A4E47
+-frost:FAFAFA/4A6FA5/1A2332/334155/909090/D4E4F7
+-garden:F5F3ED/4A7C59/333333/555555/B7472A/EBE9E1
+-sports:1B1F3B/E63946/FFFFFF/D0D0D0/6C7A96/252A4A
+-
+-固定開頭（必須完整輸出前4行）：
+-pres.defineLayout({name:"16x9",width:10,height:5.625});
+-pres.layout="16x9";
+-var theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
+-var FONT="Microsoft JhengHei";
+-
+-每張投影片：var sld=pres.addSlide({bkgd:theme.bg}); 再排版。每張都要重新宣告sld。
+-共用標題（cover/section_divider/quote_slide除外）：accent頂條h:0.06 + addText標題x:0.5,y:0.2,w:9,h:0.6,fontSize:24,bold。
+-
+-版面說明：
+-【cover】accent頂條+左裝飾線x:0.5,y:1.5,w:0.07,h:2.4+主標x:0.85,y:1.5,fontSize:40+副標y:2.85,fontSize:18,color:muted+右下色塊x:8.8,y:4.6,w:1,h:0.8
+-【section_divider】bg=accent。小標y:1.2,fontSize:14,color:bg,charSpacing:4。主標y:1.8,fontSize:36,color:FFFFFF。描述y:3.3。
+-【big_number】多指標：N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+大數字fontSize:52,color:accent+單位fontSize:14+標籤fontSize:13。單一大數字：fontSize:100,x:0.5,y:1.4,w:9,h:2.2,align:center。
+-【dual_column】左卡x:0.4,y:1.15,w:4.35,h:3.6,fill:cardBg+accent頂條+icon+標題fontSize:18+要點fontSize:13。中間"VS"。右卡x:5.25結構同左。
+-【card_grid】N張等寬cardW=2.7卡片(gap=0.45)水平置中排列，各卡含accent頂條+addIcon(0.45尺寸)+標題fontSize:16+說明fontSize:12。
+-【process_flow】accent圓形(r=0.35)水平排列+連接線y:1.85+編號fontSize:16+標題y:2.5,fontSize:14+說明y:2.95,fontSize:11。
+-【content_with_icon】左icon x:0.5,y:1.4,w:0.9+垂直線x:1.7,h:3.2+右側x:2.0,w:7.5交替標題fontSize:16+說明fontSize:13。
+-【quote_slide】bg=cardBg。"\u201C"fontSize:80。引文x:1.2,y:1.7,w:7.6,fontSize:24,italic,align:center。分隔線y:3.9。出處fontSize:14。
+-【table】header bold,fill:accent,fontSize:13。交替行fill:cardBg/bg,fontSize:12。x:0.5,y:1.1,w:9。
+-【chart】BAR:x:0.8,y:1.2,w:8.4,h:3.8,barDir:"col",chartColors:[theme.accent],showValue:true。PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
+-【conclusion】標題fontSize:28+accent線w:2+一句總結italic,color:accent+3條要點卡片y=1.9+i*1.0,h:0.75,fill:cardBg+FaCheck icon。
++SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON 格式的簡報結構。
++
++## 色票選擇（根據文件主題選一）
++| 名稱 | 適用場景 |
++|------|---------|
++| tech | 科技、AI、軟體、數位轉型 |
++| ocean | 環境、醫療、教育、公共政策 |
++| golden | 金融、商業、行銷、品牌策略 |
++| frost | 學術、研究、法律、白皮書 |
++| garden | 農業、食品、永續、ESG |
++| sports | 體育、賽事、健康、活力主題 |
++
++## 可用版面類型
++- cover: 封面（title, subtitle）
++- section_divider: 章節分隔（label, title, description）
++- big_number: 關鍵指標（title, items:[{value,unit,label}], 1-3個）
++- card_grid: 並列卡片（title, cards:[{icon,title,description}], 2-4張）
++- dual_column: 比較（title, left/right:{icon,title,points:[]}）
++- process_flow: 流程步驟（title, steps:[{title,description}], 2-5步）
++- content_with_icon: 圖文（title, icon, blocks:[{title,description}], 1-4個）
++- quote_slide: 金句（quote, source）
++- table: 表格（title, headers:[], rows:[[]]）
++- chart: 圖表（title, chart_type:BAR|PIE, labels:[], values:[]）⚠️ 僅當文件含具體數字時使用
++- conclusion: 結尾（title, summary, points:[{text,icon}]）
++
++可用 icon：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog
++
++## 內容規則
++- 首頁 cover，末頁 conclusion
++- 相鄰兩頁不可相同 layout，全簡報 ≥5 種不同 layout
++- 繁體中文，不編造數據或引言
++- 標題≤15字，要點≤25字
++- 有明確數字優先用 big_number；chart 僅用於文件有具體數字時
++- 敘事弧線：匯報(背景→發現→數據→啟示→結論) | 提案(痛點→方案→佐證→行動) | 分析(定義→拆解→利弊→建議) | 教學(重要性→概念→步驟→回顧)
++
++## 輸出範例（4頁示意，實際需封面＋12-15頁內容＋結尾，共 14-17 頁）
++```json
++{
++  "theme": "tech",
++  "narrative": "匯報",
++  "slides": [
++    {"layout": "cover", "title": "AI 導入成效報告", "subtitle": "2026 Q1 季度回顧"},
++    {"layout": "big_number", "title": "關鍵指標", "items": [
++      {"value": "98%", "unit": "準確率", "label": "模型推論"},
++      {"value": "3.2x", "unit": "加速", "label": "處理速度"}
++    ]},
++    {"layout": "card_grid", "title": "三大策略方向", "cards": [
++      {"icon": "FaRocket", "title": "擴展部署", "description": "推廣至五個部門"},
++      {"icon": "FaDatabase", "title": "資料整合", "description": "統一資料湖架構"},
++      {"icon": "FaUsers", "title": "人才培訓", "description": "培訓兩百名工程師"}
++    ]},
++    {"layout": "conclusion", "title": "總結與展望", "summary": "AI 導入已見初步成效",
++     "points": [{"text": "模型準確率達 98%"}, {"text": "處理速度提升 3.2 倍"}, {"text": "下季度擴展至全公司", "icon": "FaRocket"}]}
++  ]
++}
++```
+ 
+-規則：
+-- (x+w)≤9.7,(y+h)≤5.5。N卡片：totalW=N*2.7+(N-1)*0.45≤9.3，startX=(10-totalW)/2
+-- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
+-- 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
+-- 不連續兩頁同版面。一頁最多4卡片/5步驟。有數字用big_number不用bullet
+-
+-程式碼規則（違反會執行錯誤）：
+-- 每張投影片先var sld=pres.addSlide({bkgd:theme.bg})
+-- 所有字串用雙引號，禁用單引號
+-- 每個變數只宣告一次，不同投影片用不同名（stats1/stats2，cx1/cx2）
+-- 程式碼結尾只到最後一個};，不加---或說明文字
+-- 禁用ShapeType.circle（改用ellipse）。addShape只用rect或ellipse
+-- 用var，不用let/const
+-
+-輸出：只輸出JS，不加```。前4行必須是defineLayout/layout/theme/FONT。不呼叫writeFile()。8-12頁，首頁cover末頁conclusion，≥4種版面，≥4頁用addIcon。
++## 輸出規則
++- 只輸出 JSON，不加 ```json 標記或任何說明文字
++- slides 陣列必須包含 14-17 頁（1 封面 ＋ 12-15 內容頁 ＋ 1 結尾）
++- 充分利用文件素材，每個主題/章節至少一頁，不要將多個主題壓縮在一頁
++- 輸出必須是合法的 JSON
+ """
+ 
+ VIDEO_SCRIPT_PROMPT = """你是一位專業的影片旁白撰寫人。請根據以下文件內容，撰寫一段影片解說旁白腳本。
+@@ -271,6 +278,58 @@ def _strip_code_fence(raw: str) -> str:
+     return raw
+ 
+ 
++def _sanitize_json(raw: str) -> str:
++    """
++    Clean common LLM JSON output issues before Pydantic validation.
++    1. Strip markdown code fences (```json ... ```)
++    2. Remove trailing commas before } or ]
++    3. Unescape literal newlines inside JSON strings
++    """
++    import re
++    # 1. Strip code fences
++    text = _strip_code_fence(raw)
++    # 2. Remove trailing commas: {"a": 1,} → {"a": 1}
++    text = re.sub(r",\s*([}\]])", r"\1", text)
++    # 3. Replace literal (unescaped) newlines inside JSON strings with \\n
++    # Only replace newlines that are inside double-quoted strings
++    def _fix_newlines(m: re.Match) -> str:
++        return m.group(0).replace("\n", "\\n").replace("\r", "")
++    text = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', _fix_newlines, text, flags=re.DOTALL)
++    return text.strip()
++
++
++async def _fix_slides_json(raw_json: str, validation_error: str) -> str:
++    """
++    Ask the LLM to fix a JSON validation error in slides spec.
++    Returns the corrected JSON string, or the original if the fix fails.
++    Uses slides_model if configured.
++    """
++    from app.routers.settings import _runtime_settings as _rs
++    fix_prompt = (
++        "以下 JSON 簡報資料有驗證錯誤，請修正並只輸出修正後的完整 JSON，不加任何說明或 markdown 標記。\n\n"
++        f"錯誤訊息：\n{validation_error}\n\n"
++        f"原始 JSON：\n{raw_json}"
++    )
++    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
++    fix_client = _fresh_async_client()
++    llm = get_llm(
++        async_client=fix_client,
++        model_override=_rs.slides_model if _rs.slides_model else None,
++    )
++    try:
++        parts: list[str] = []
++        async for chunk in await llm.astream_chat(messages):
++            if chunk.delta:
++                parts.append(chunk.delta)
++        fixed = "".join(parts).strip()
++        return _sanitize_json(fixed) if fixed else raw_json
++    except Exception:
++        logging.exception("_fix_slides_json LLM call failed — using original JSON")
++        return raw_json
++    finally:
++        await fix_client.aclose()
++
++
+ def _format_text(artifact_type: str, data: dict) -> str:
+     """Extract a plain-text representation from parsed JSON data."""
+     if artifact_type == "video_script":
+@@ -360,7 +419,7 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+         llm = get_llm(
+             async_client=_stream_client,
+             model_override=_rs.slides_model if artifact_type == "slides" and _rs.slides_model else None,
+-            max_tokens_override=16384 if artifact_type == "slides" else None,
++            max_tokens_override=8192 if artifact_type == "slides" else None,
+         )
+         messages = [
+             ChatMessage(role=MessageRole.SYSTEM, content=prompt),
+@@ -435,16 +494,43 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+             return
+ 
+         if artifact_type == "slides":
+-            # LLM returns PptxGenJS JavaScript code (not JSON).
+-            # Save code but keep status="generating" so the frontend keeps polling.
+-            # _generate_slides_pptx_bg will set status="done" after thumbnails are ready.
++            # LLM returns structured JSON (SlidesSpec), not PptxGenJS code.
++            # Validate via Pydantic, fix once if needed, then hand off to renderer.
++            from pydantic import ValidationError
++            from app.schemas.slides import SlidesSpec
++
++            sanitized = _sanitize_json(raw)
++            spec: SlidesSpec | None = None
++            try:
++                spec = SlidesSpec.model_validate_json(sanitized)
++            except (ValidationError, Exception) as first_err:
++                logging.warning(
++                    "SlidesSpec validation failed for artifact %d — asking LLM to fix: %s",
++                    artifact_id, str(first_err)[:300],
++                )
++                update_studio_artifact(artifact_id, progress_message="JSON 格式有誤，正在要求 AI 修正…")
++                fixed_json = await _fix_slides_json(sanitized, str(first_err))
++                try:
++                    spec = SlidesSpec.model_validate_json(fixed_json)
++                    sanitized = fixed_json
++                except (ValidationError, Exception) as second_err:
++                    update_studio_artifact(
++                        artifact_id,
++                        status="error",
++                        content_json="{}",
++                        content_text=raw,
++                        error_message=f"簡報 JSON 驗證失敗，請稍後重試。({str(second_err)[:200]})",
++                    )
++                    return
++
++            spec_json = spec.model_dump_json()
+             update_studio_artifact(
+                 artifact_id,
+-                content_json="{}",
+-                content_text=raw,
+-                progress_message="AI 產碼完成，正在建立簡報…",
++                content_json=spec_json,
++                content_text="",
++                progress_message="AI 產出完成，正在建立簡報…",
+             )
+-            asyncio.create_task(_generate_slides_pptx_bg(artifact_id, raw))
++            asyncio.create_task(_generate_slides_from_json(artifact_id, spec_json))
+             return
+ 
+         data = json.loads(raw)
+@@ -478,6 +564,93 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+ 
+ _THUMB_ROOT = Path("/data/thumbnails")
+ 
++# Limit concurrent slides renders (JSON renderer + LibreOffice thumbnail generation
++# both consume significant CPU/memory; cap at 2 to avoid OOM on constrained hosts).
++_SLIDES_SEMAPHORE = asyncio.Semaphore(2)
++
++
++async def _generate_slides_from_json(artifact_id: int, spec_json: str) -> None:
++    """
++    Background task: convert a validated SlidesSpec JSON string into a PPTX
++    file using the deterministic slides_renderer.js template engine, then
++    generate thumbnails and run optional Vision QA.
++    """
++    async with _SLIDES_SEMAPHORE:
++        await _generate_slides_from_json_inner(artifact_id, spec_json)
++
++
++async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> None:
++    import time
++    from app.services.pptx_runner_service import execute_slides_json, RunResult
++    from app.services.thumbnail_service import generate_thumbnails
++
++    t0 = time.monotonic()
++
++    with tempfile.TemporaryDirectory() as tmp:
++        pptx_tmp = str(Path(tmp) / "slides.pptx")
++        update_studio_artifact(artifact_id, progress_message="正在渲染簡報範本…")
++
++        result, stderr = await execute_slides_json(spec_json, pptx_tmp)
++
++        if result != RunResult.SUCCESS:
++            logging.error(
++                "slides_renderer failed for artifact %d (%s): %s",
++                artifact_id, result, stderr,
++            )
++            update_studio_artifact(
++                artifact_id,
++                status="error",
++                error_message="簡報渲染失敗，請稍後重試。",
++            )
++            return
++
++        # Persist PPTX for download
++        persistent_dir = _THUMB_ROOT / str(artifact_id)
++        persistent_dir.mkdir(parents=True, exist_ok=True)
++        pptx_path = persistent_dir / "slides.pptx"
++        shutil.copy2(pptx_tmp, pptx_path)
++
++        update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
++        try:
++            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
++        except Exception:
++            logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
++            update_studio_artifact(
++                artifact_id,
++                status="error",
++                error_message="縮圖生成失敗，請稍後重試。",
++            )
++            return
++
++        # Optional Vision QA
++        from app.routers.settings import _runtime_settings
++        from app.services.vision_qa import visual_qa_check
++        from app.services.thumbnail_service import get_thumbnail_urls
++
++        if _runtime_settings.vision_model:
++            thumb_urls = get_thumbnail_urls(artifact_id)
++            thumb_paths = [_THUMB_ROOT / str(artifact_id) / Path(u).name for u in thumb_urls]
++            update_studio_artifact(artifact_id, progress_message="正在進行視覺品質檢查…")
++            issues = await visual_qa_check(
++                thumb_paths,
++                api_base_url=_runtime_settings.llm_api_base_url,
++                api_key=_runtime_settings.llm_api_key,
++                model=_runtime_settings.vision_model,
++            )
++            problem_count = sum(len(s.get("issues", [])) for s in issues)
++            if problem_count > 0:
++                logging.warning(
++                    "Vision QA found %d issue(s) in artifact %d: %s",
++                    problem_count, artifact_id, issues,
++                )
++
++        elapsed = time.monotonic() - t0
++        logging.info(
++            "slides_from_json artifact=%d done in %.1fs (renderer+thumbnails+qa)",
++            artifact_id, elapsed,
++        )
++        update_studio_artifact(artifact_id, status="done", progress_message="")
++
+ 
+ async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:
+     """

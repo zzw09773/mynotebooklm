@@ -1,0 +1,624 @@
+commit 2ebde134e5b8ccbe859663cc0cb5d48e205f227d
+Author: AIA Assistant <aia@example.com>
+Date:   Mon Mar 30 01:46:27 2026 +0000
+
+    feat: integrate ComfyUI Flux for AI-generated slide illustrations
+    
+    - Add comfyui_service.py: async client for ComfyUI Flux.1-dev workflow
+    - Add comfyui_api_url setting (config, settings router, SettingsModal)
+    - Auto-generate illustrations for cover/section_divider/content_with_icon slides
+    - Non-fatal: ComfyUI unavailable or disabled does not block slide generation
+    - Add host.docker.internal mapping in docker-compose for host service access
+    - Create /data/comfyui_images temp directory on startup
+
+diff --git a/backend/app/config.py b/backend/app/config.py
+index 75ad117..9d451bb 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -31,6 +31,9 @@ class Settings(BaseSettings):
+     slides_model: str = ""   # Optional: dedicated model for slides generation (empty = use llm_model)
+     vlm_dpi: int = 96  # DPI for VLM image rendering (higher = better quality, slower)
+ 
++    # ── ComfyUI ───────────────────────────────────────────────
++    comfyui_api_url: str = ""  # e.g. "http://127.0.0.1:8188" (empty = disabled)
++
+     # ── Data paths ───────────────────────────────────────────
+     upload_dir: str = os.getenv("UPLOAD_DIR", "/data/uploads")
+     chroma_db_dir: str = os.getenv("CHROMA_DB_DIR", "/data/chroma_db")
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 8087698..88f7ca6 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -53,6 +53,9 @@ _THUMB_DIR = Path("/data/thumbnails")
+ _THUMB_DIR.mkdir(parents=True, exist_ok=True)
+ app.mount("/thumbnails", StaticFiles(directory=str(_THUMB_DIR)), name="thumbnails")
+ 
++# Create ComfyUI images directory (used as temp storage before embedding into PPTX)
++Path("/data/comfyui_images").mkdir(parents=True, exist_ok=True)
++
+ 
+ @app.get("/health", tags=["系統"])
+ async def health():
+diff --git a/backend/app/routers/settings.py b/backend/app/routers/settings.py
+index d84e508..7b93cff 100644
+--- a/backend/app/routers/settings.py
++++ b/backend/app/routers/settings.py
+@@ -45,6 +45,8 @@ def _build_runtime_settings():
+         base.vision_model = persisted["vision_model"]
+     if persisted.get("slides_model") is not None:
+         base.slides_model = persisted["slides_model"]
++    if persisted.get("comfyui_api_url") is not None:
++        base.comfyui_api_url = persisted["comfyui_api_url"]
+     return base
+ 
+ 
+@@ -71,6 +73,7 @@ class SettingsResponse(BaseModel):
+     llm_max_tokens: int
+     vision_model: str
+     slides_model: str
++    comfyui_api_url: str
+ 
+ 
+ class SettingsUpdate(BaseModel):
+@@ -84,6 +87,7 @@ class SettingsUpdate(BaseModel):
+     llm_max_tokens: int | None = None
+     vision_model: str | None = None
+     slides_model: str | None = None
++    comfyui_api_url: str | None = None
+ 
+ 
+ class ModelInfo(BaseModel):
+@@ -110,6 +114,7 @@ async def get_current_settings(current_user: User = Depends(get_current_user)):
+         llm_max_tokens=_runtime_settings.llm_max_tokens,
+         vision_model=_runtime_settings.vision_model,
+         slides_model=_runtime_settings.slides_model,
++        comfyui_api_url=_runtime_settings.comfyui_api_url,
+     )
+ 
+ 
+@@ -147,6 +152,9 @@ async def update_settings(update: SettingsUpdate, current_user: User = Depends(g
+     if update.slides_model is not None:
+         _runtime_settings.slides_model = update.slides_model
+         changed["slides_model"] = update.slides_model
++    if update.comfyui_api_url is not None:
++        _runtime_settings.comfyui_api_url = update.comfyui_api_url
++        changed["comfyui_api_url"] = update.comfyui_api_url
+ 
+     # Persist to DB so settings survive restarts
+     for key, value in changed.items():
+diff --git a/backend/app/services/comfyui_service.py b/backend/app/services/comfyui_service.py
+new file mode 100644
+index 0000000..324113c
+--- /dev/null
++++ b/backend/app/services/comfyui_service.py
+@@ -0,0 +1,247 @@
++"""
++comfyui_service.py — Async client for ComfyUI image generation API.
++
++Integrates with the Flux.1-dev workflow verified on the target ComfyUI instance:
++  - Diffusion model: flux1-dev-fp8.safetensors (UNETLoader)
++  - Text encoders:   t5xxl_fp8_e4m3fn.safetensors + clip_l.safetensors (DualCLIPLoader, type="flux")
++  - VAE:             ae.safetensors (VAELoader)
++  - Sampler:         SamplerCustomAdvanced + BasicGuider + FluxGuidance (NOT KSampler)
++
++Usage:
++    from app.services.comfyui_service import is_available, generate_image
++
++    if await is_available():
++        ok = await generate_image("a professional illustration of...", Path("/data/..."))
++"""
++import copy
++import logging
++import random
++import uuid
++from pathlib import Path
++
++import httpx
++
++log = logging.getLogger(__name__)
++
++# ── Flux Workflow Template ─────────────────────────────────────────────────────
++# Verified against actual ComfyUI history on this instance.
++# Nodes 10, 11, 12, 16, 17 are model-load nodes that ComfyUI caches between runs.
++# Only node "30" (text) and node "25" (seed) change between calls.
++
++_FLUX_WORKFLOW: dict = {
++    # ── Output ─────────────────────────────────────────────────────────────────
++    "8": {
++        "class_type": "VAEDecode",
++        "inputs": {"samples": ["13", 0], "vae": ["10", 0]},
++    },
++    "9": {
++        "class_type": "SaveImage",
++        "inputs": {"filename_prefix": "notebooklm_slide", "images": ["8", 0]},
++    },
++    # ── Model loaders (auto-cached by ComfyUI after first load) ────────────────
++    "10": {
++        "class_type": "VAELoader",
++        "inputs": {"vae_name": "ae.safetensors"},
++    },
++    "11": {
++        "class_type": "DualCLIPLoader",
++        "inputs": {
++            "clip_name1": "t5xxl_fp8_e4m3fn.safetensors",
++            "clip_name2": "clip_l.safetensors",
++            "type": "flux",
++        },
++    },
++    "12": {
++        "class_type": "UNETLoader",
++        "inputs": {"unet_name": "flux1-dev-fp8.safetensors", "weight_dtype": "default"},
++    },
++    # ── Sampling pipeline ──────────────────────────────────────────────────────
++    "13": {
++        "class_type": "SamplerCustomAdvanced",
++        "inputs": {
++            "noise": ["25", 0],
++            "guider": ["22", 0],
++            "sampler": ["16", 0],
++            "sigmas": ["17", 0],
++            "latent_image": ["27", 0],
++        },
++    },
++    "16": {
++        "class_type": "KSamplerSelect",
++        "inputs": {"sampler_name": "euler"},
++    },
++    "17": {
++        "class_type": "BasicScheduler",
++        "inputs": {
++            "scheduler": "simple",
++            "steps": 20,
++            "denoise": 1.0,
++            "model": ["12", 0],
++        },
++    },
++    "22": {
++        "class_type": "BasicGuider",
++        "inputs": {"model": ["12", 0], "conditioning": ["26", 0]},
++    },
++    "25": {
++        "class_type": "RandomNoise",
++        "inputs": {"noise_seed": 0},  # replaced at runtime
++    },
++    # ── Prompt + Guidance ──────────────────────────────────────────────────────
++    "26": {
++        "class_type": "FluxGuidance",
++        "inputs": {"guidance": 3.5, "conditioning": ["30", 0]},
++    },
++    "27": {
++        "class_type": "EmptyLatentImage",
++        "inputs": {"width": 1024, "height": 768, "batch_size": 1},  # 4:3 for slides
++    },
++    "30": {
++        "class_type": "CLIPTextEncode",
++        "inputs": {
++            "text": "",  # replaced at runtime with English prompt
++            "clip": ["11", 0],
++        },
++    },
++}
++
++
++def _get_api_url() -> str:
++    """Return ComfyUI base URL from runtime settings (empty string if disabled)."""
++    try:
++        from app.routers.settings import _runtime_settings
++        return _runtime_settings.comfyui_api_url.rstrip("/")
++    except Exception:
++        return ""
++
++
++async def is_available() -> bool:
++    """Return True if ComfyUI is reachable at the configured URL."""
++    base_url = _get_api_url()
++    if not base_url:
++        return False
++    try:
++        async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
++            resp = await client.get(f"{base_url}/system_stats")
++            return resp.status_code == 200
++    except Exception as exc:
++        log.debug("ComfyUI not available at %s: %s", base_url, exc)
++        return False
++
++
++async def generate_image(
++    prompt: str,
++    save_path: Path,
++    width: int = 1024,
++    height: int = 768,
++    seed: int | None = None,
++    timeout: int = 180,
++) -> bool:
++    """
++    Generate one image via ComfyUI Flux workflow and save it to save_path.
++
++    Args:
++        prompt:    English image generation prompt (Flux does not support Chinese).
++        save_path: Where to save the downloaded PNG file.
++        width:     Image width in pixels (default 1024, 4:3 landscape for slides).
++        height:    Image height in pixels (default 768).
++        seed:      RNG seed. Random if None.
++        timeout:   Max seconds to wait for generation.
++
++    Returns:
++        True on success, False on any failure (non-fatal — caller can skip illustration).
++    """
++    base_url = _get_api_url()
++    if not base_url:
++        log.debug("ComfyUI disabled (comfyui_api_url not set)")
++        return False
++
++    if seed is None:
++        seed = random.randint(0, 2**32 - 1)
++
++    # Build workflow with injected prompt, seed, and dimensions
++    workflow = copy.deepcopy(_FLUX_WORKFLOW)
++    workflow["30"]["inputs"]["text"] = prompt
++    workflow["25"]["inputs"]["noise_seed"] = seed
++    workflow["27"]["inputs"]["width"] = width
++    workflow["27"]["inputs"]["height"] = height
++
++    client_id = str(uuid.uuid4())
++    payload = {"prompt": workflow, "client_id": client_id}
++
++    try:
++        async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(30.0, connect=10.0)) as client:
++            # 1. Submit workflow
++            resp = await client.post(f"{base_url}/prompt", json=payload)
++            if resp.status_code != 200:
++                log.warning("ComfyUI /prompt returned %d: %s", resp.status_code, resp.text[:200])
++                return False
++
++            data = resp.json()
++            prompt_id: str = data.get("prompt_id", "")
++            if not prompt_id:
++                log.warning("ComfyUI response missing prompt_id: %s", data)
++                return False
++
++            log.info("ComfyUI submitted prompt_id=%s seed=%d", prompt_id, seed)
++
++        # 2. Poll /history/{prompt_id} until completed or timeout
++        import asyncio
++        import time
++        deadline = time.monotonic() + timeout
++        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
++            while time.monotonic() < deadline:
++                await asyncio.sleep(2.0)
++                try:
++                    hist_resp = await client.get(f"{base_url}/history/{prompt_id}")
++                    hist = hist_resp.json()
++                except Exception as exc:
++                    log.debug("ComfyUI history poll failed: %s", exc)
++                    continue
++
++                item = hist.get(prompt_id, {})
++                status = item.get("status", {})
++                if status.get("completed"):
++                    # 3. Extract output filename
++                    outputs = item.get("outputs", {})
++                    images = outputs.get("9", {}).get("images", [])
++                    if not images:
++                        log.warning("ComfyUI completed but no images in output for prompt_id=%s", prompt_id)
++                        return False
++
++                    img_info = images[0]
++                    filename = img_info["filename"]
++                    subfolder = img_info.get("subfolder", "")
++                    img_type = img_info.get("type", "output")
++
++                    # 4. Download the image
++                    params = {"filename": filename, "subfolder": subfolder, "type": img_type}
++                    img_resp = await client.get(f"{base_url}/view", params=params)
++                    if img_resp.status_code != 200:
++                        log.warning("ComfyUI /view returned %d for %s", img_resp.status_code, filename)
++                        return False
++
++                    save_path.parent.mkdir(parents=True, exist_ok=True)
++                    save_path.write_bytes(img_resp.content)
++                    log.info("ComfyUI image saved to %s (%d bytes)", save_path, len(img_resp.content))
++                    return True
++
++                # Check for execution error
++                messages = status.get("messages", [])
++                for msg_type, _msg_data in messages:
++                    if msg_type == "execution_error":
++                        log.error("ComfyUI execution error for prompt_id=%s", prompt_id)
++                        return False
++
++        log.warning("ComfyUI timed out after %ds for prompt_id=%s", timeout, prompt_id)
++        return False
++
++    except httpx.ConnectError as exc:
++        log.warning("ComfyUI connection error: %s", exc)
++        return False
++    except httpx.TimeoutException as exc:
++        log.warning("ComfyUI timeout: %s", exc)
++        return False
++    except Exception as exc:
++        log.error("ComfyUI unexpected error: %s", exc, exc_info=True)
++        return False
+diff --git a/backend/app/services/studio_service.py b/backend/app/services/studio_service.py
+index 9de0a81..d024633 100644
+--- a/backend/app/services/studio_service.py
++++ b/backend/app/services/studio_service.py
+@@ -610,6 +610,17 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) ->
+         pptx_path = persistent_dir / "slides.pptx"
+         shutil.copy2(pptx_tmp, pptx_path)
+ 
++        # Optional: add AI-generated illustrations via ComfyUI (non-fatal if unavailable)
++        from app.routers.settings import _runtime_settings as _rs_slides
++        from app.services import comfyui_service
++        if _rs_slides.comfyui_api_url and await comfyui_service.is_available():
++            try:
++                from app.schemas.slides import SlidesSpec
++                spec = SlidesSpec.model_validate_json(spec_json)
++                await _add_illustrations_to_pptx(artifact_id, pptx_path, spec)
++            except Exception:
++                logging.exception("ComfyUI illustration step failed for artifact=%d — skipping", artifact_id)
++
+         update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
+         try:
+             await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+@@ -652,6 +663,222 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) ->
+         update_studio_artifact(artifact_id, status="done", progress_message="")
+ 
+ 
++# ── ComfyUI slide illustration helpers ────────────────────────────────────────
++
++_SLIDE_ILLUSTRATION_PROMPT = """\
++You are an expert at creating image prompts for business presentation slides.
++Write ONE English image generation prompt for Flux AI based on the slide details below.
++
++CRITICAL RULES:
++- Output must be 100% English — Flux does not support Chinese
++- Visually represent the SPECIFIC topic using relevant objects/icons, NOT generic nature or landscapes
++- Topic-to-visual mapping examples:
++    AI / machine learning  → neural network, circuit nodes, data streams, robot icon
++    compliance / legal     → shield, document, checkmark, balance scale, seal, lock
++    risk / security        → shield, lock, firewall, warning icon, protected layers
++    data / metrics         → bar chart, dashboard, data nodes, graph, analytics
++    process / workflow     → flowchart arrows, gear, pipeline, connected steps
++    finance / investment   → coins, chart arrow, growth bar, currency symbol
++
++Style instructions:
++- Flat vector illustration, clean minimal, corporate color palette
++- Light or white background; avoid dark moody scenes
++- No human faces; no text or letters in the image
++- Landscape 4:3 format suitable as a slide visual
++
++Slide layout : {layout}
++Slide title  : {title}
++Slide content: {content_hint}
++
++Output ONLY the prompt (20-45 words), nothing else:"""
++
++# Layouts worth illustrating.
++# Only layouts that have a natural empty zone for an image:
++#   cover          – right-half panel (text is confined to left 60%)
++#   section_divider – full-page background (image sent to back layer)
++#   content_with_icon – icon+text on left, right third is empty
++# Excluded: big_number / card_grid / dual_column / process_flow
++#   (cards/columns fill the full slide width — any image would overlap content)
++_ILLUSTRATABLE_LAYOUTS = frozenset(
++    {"cover", "section_divider", "content_with_icon"}
++)
++
++# Max illustrations per presentation to avoid very long generation times
++_MAX_ILLUSTRATIONS = 5
++
++# ComfyUI images temp directory
++_COMFYUI_IMG_ROOT = Path("/data/comfyui_images")
++
++
++async def _generate_image_prompts_for_slides(
++    eligible: list[tuple[int, object]],
++) -> list[str | None]:
++    """
++    Use LLM to generate English image generation prompts for each eligible slide.
++    Returns a list of prompt strings (or None if generation fails per slide).
++    """
++    from app.routers.settings import _runtime_settings as _rs
++
++    prompts: list[str | None] = []
++    client = _fresh_async_client()
++    llm = get_llm(async_client=client)
++
++    try:
++        for _slide_idx, slide_data in eligible:
++            title = getattr(slide_data, "title", "") or getattr(slide_data, "quote", "") or ""
++            layout = getattr(slide_data, "layout", "")
++
++            # Build a content hint from available slide fields so the LLM
++            # can generate a topically relevant prompt instead of guessing.
++            hint_parts: list[str] = []
++            subtitle = getattr(slide_data, "subtitle", "") or getattr(slide_data, "description", "")
++            if subtitle:
++                hint_parts.append(subtitle)
++            bullets: list = getattr(slide_data, "bullets", []) or []
++            if bullets:
++                hint_parts.extend(str(b) for b in bullets[:3])  # first 3 bullets
++            # For card_grid / dual_column layouts, grab card titles
++            cards: list = getattr(slide_data, "cards", []) or []
++            if cards:
++                hint_parts.extend(getattr(c, "title", "") for c in cards[:3])
++            content_hint = "; ".join(p for p in hint_parts if p) or "(none)"
++
++            user_msg = _SLIDE_ILLUSTRATION_PROMPT.format(
++                layout=layout, title=title, content_hint=content_hint
++            )
++            messages = [ChatMessage(role=MessageRole.USER, content=user_msg)]
++            try:
++                parts: list[str] = []
++                async for chunk in await llm.astream_chat(messages):
++                    if chunk.delta:
++                        parts.append(chunk.delta)
++                img_prompt = "".join(parts).strip()
++                prompts.append(img_prompt if img_prompt else None)
++            except Exception:
++                logging.exception("Image prompt LLM call failed for slide_idx=%d", _slide_idx)
++                prompts.append(None)
++    finally:
++        await client.aclose()
++
++    return prompts
++
++
++def _embed_images_in_pptx(
++    pptx_path: Path,
++    slides_info: list[tuple[int, object]],
++    image_paths: list[Path | None],
++) -> None:
++    """
++    Open the PPTX with python-pptx and embed generated illustrations.
++    Positions vary by layout:
++      - cover: right half large image
++      - section_divider: full-page background (sent to back)
++      - others: right-side inset
++    Non-fatal: skips individual images that fail.
++    """
++    from pptx import Presentation
++    from pptx.util import Inches
++
++    prs = Presentation(str(pptx_path))
++    modified = False
++
++    for (slide_idx, slide_data), img_path in zip(slides_info, image_paths):
++        if img_path is None or not img_path.exists():
++            continue
++        if slide_idx >= len(prs.slides):
++            continue
++
++        sld = prs.slides[slide_idx]
++        layout = getattr(slide_data, "layout", "")
++
++        try:
++            if layout == "section_divider":
++                # Full-page background — add picture then send to back
++                pic = sld.shapes.add_picture(str(img_path), Inches(0), Inches(0), Inches(10), Inches(5.625))
++                sp = pic._element
++                sld.shapes._spTree.remove(sp)
++                sld.shapes._spTree.insert(2, sp)  # behind all other elements
++            elif layout == "cover":
++                # Right-panel illustration — starts at 60% width, full height
++                # Title text is left-aligned so stays within the left 60%
++                sld.shapes.add_picture(str(img_path), Inches(6.0), Inches(0), Inches(4.0), Inches(5.625))
++            else:
++                # content_with_icon: icon+text block is on the left, right third is empty
++                sld.shapes.add_picture(str(img_path), Inches(7.2), Inches(1.5), Inches(2.4), Inches(2.4))
++            modified = True
++            logging.info("Embedded illustration for slide %d (layout=%s)", slide_idx, layout)
++        except Exception:
++            logging.exception("Failed to embed image for slide %d", slide_idx)
++
++    if modified:
++        prs.save(str(pptx_path))
++        logging.info("PPTX saved with illustrations: %s", pptx_path)
++
++
++async def _add_illustrations_to_pptx(
++    artifact_id: int,
++    pptx_path: Path,
++    spec: object,
++) -> None:
++    """
++    Generate ComfyUI illustrations for eligible slides and embed them into the PPTX.
++    Non-fatal: any failure is logged and silently skipped.
++    """
++    from app.services.comfyui_service import generate_image as comfyui_generate
++
++    slides = getattr(spec, "slides", [])
++    eligible = [
++        (i, s) for i, s in enumerate(slides)
++        if getattr(s, "layout", "") in _ILLUSTRATABLE_LAYOUTS
++    ][:_MAX_ILLUSTRATIONS]
++
++    if not eligible:
++        logging.info("No illustratable slides found for artifact=%d", artifact_id)
++        return
++
++    logging.info("Generating ComfyUI illustrations for %d slides (artifact=%d)", len(eligible), artifact_id)
++    update_studio_artifact(artifact_id, progress_message=f"正在生成投影片插圖 (0/{len(eligible)})…")
++
++    # Step 1: Generate English prompts via LLM
++    img_prompts = await _generate_image_prompts_for_slides(eligible)
++
++    # Step 2: Generate images via ComfyUI (max 2 concurrent)
++    img_dir = _COMFYUI_IMG_ROOT / str(artifact_id)
++    img_dir.mkdir(parents=True, exist_ok=True)
++
++    sem = asyncio.Semaphore(2)
++    image_paths: list[Path | None] = [None] * len(eligible)
++    completed = [0]
++
++    async def gen_one(idx: int, prompt: str | None) -> None:
++        if not prompt:
++            return
++        async with sem:
++            save_path = img_dir / f"slide_{eligible[idx][0]:03d}.png"
++            ok = await comfyui_generate(prompt, save_path)
++            if ok:
++                image_paths[idx] = save_path
++            completed[0] += 1
++            update_studio_artifact(
++                artifact_id,
++                progress_message=f"正在生成投影片插圖 ({completed[0]}/{len(eligible)})…",
++            )
++
++    await asyncio.gather(*[gen_one(i, p) for i, p in enumerate(img_prompts)])
++
++    success_count = sum(1 for p in image_paths if p is not None)
++    if success_count == 0:
++        logging.warning("ComfyUI: no illustrations generated for artifact=%d", artifact_id)
++        return
++
++    # Step 3: Embed images into PPTX
++    await asyncio.to_thread(_embed_images_in_pptx, pptx_path, eligible, image_paths)
++    logging.info(
++        "ComfyUI illustrations: %d/%d embedded for artifact=%d",
++        success_count, len(eligible), artifact_id,
++    )
++
++
+ async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:
+     """
+     Ask the LLM to fix an error in PptxGenJS code.
+diff --git a/docker-compose.yml b/docker-compose.yml
+index b7949d0..b19622c 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -16,6 +16,8 @@ services:
+     ports:
+       - 8100:8000
+     restart: always
++    extra_hosts:
++      - "host.docker.internal:host-gateway"
+     networks:
+       - notebooklm_network
+ 
+diff --git a/frontend/src/components/SettingsModal.tsx b/frontend/src/components/SettingsModal.tsx
+index 039eb24..17b0aa2 100644
+--- a/frontend/src/components/SettingsModal.tsx
++++ b/frontend/src/components/SettingsModal.tsx
+@@ -207,6 +207,20 @@ export function SettingsModal({
+                         )}
+                     </div>
+ 
++                    <div>
++                        <label htmlFor="comfyui-url" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
++                            ComfyUI URL <span className="text-[var(--text-muted)]">— 用於簡報插圖自動生成（空白 = 停用）</span>
++                        </label>
++                        <input
++                            id="comfyui-url"
++                            type="text"
++                            placeholder="http://host.docker.internal:8188"
++                            value={settingsForm.comfyui_api_url || ""}
++                            onChange={(e) => onFormChange({ ...settingsForm, comfyui_api_url: e.target.value })}
++                            className="w-full px-3 py-2 bg-[var(--bg-tertiary)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:border-primary-500/50 outline-none transition-colors"
++                        />
++                    </div>
++
+                     <div>
+                         <label htmlFor="temperature" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
+                             Temperature: {settingsForm.temperature?.toFixed(2) ?? "0.10"}

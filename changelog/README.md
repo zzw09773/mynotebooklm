@@ -25,7 +25,29 @@ changelog/
 
 ## 📝 版本記錄
 
-### v0.2.0 - Pydantic 模型和幻燈片渲染邏輯 ⭐ 最新版本
+### v1.1.0 - ComfyUI Flux 幻燈片插圖自動生成 ⭐ 最新版本
+**日期：** 2026-03-30  
+**分支：** `v1.1.0`  
+**Commit：** `2ebde13`
+
+**主要改動：**
+- 🎨 ComfyUI Flux.1-dev 文生圖整合
+- 🖼️ 幻燈片自動插圖（cover / section_divider / content_with_icon）
+- 🔧 新增 ComfyUI URL 設定欄位
+- 🐳 Docker 新增 host.docker.internal 映射
+- 🛡️ 非強制設計（停用不影響幻燈片生成）
+
+**統計：**
+- 7 個檔案新增或修改
+- 504 行新增 / 0 行刪除
+
+**檔案：**
+- 📄 詳細說明：`CHANGELOG_v1.1.0_comfyui-illustration.md`
+- 🔀 完整 diff：`comfyui-illustration-v1.1.0.diff`
+
+---
+
+### v0.2.0 - Pydantic 模型和幻燈片渲染邏輯
 **日期：** 2026-03-26  
 **分支：** `v0.2.0`  
 **Commit：** `7226b44`

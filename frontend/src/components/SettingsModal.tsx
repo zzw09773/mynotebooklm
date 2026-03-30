@@ -208,6 +208,20 @@ export function SettingsModal({
                     </div>
 
                     <div>
+                        <label htmlFor="comfyui-url" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
+                            ComfyUI URL <span className="text-[var(--text-muted)]">— 用於簡報插圖自動生成（空白 = 停用）</span>
+                        </label>
+                        <input
+                            id="comfyui-url"
+                            type="text"
+                            placeholder="http://host.docker.internal:8188"
+                            value={settingsForm.comfyui_api_url || ""}
+                            onChange={(e) => onFormChange({ ...settingsForm, comfyui_api_url: e.target.value })}
+                            className="w-full px-3 py-2 bg-[var(--bg-tertiary)] border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:border-primary-500/50 outline-none transition-colors"
+                        />
+                    </div>
+
+                    <div>
                         <label htmlFor="temperature" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
                             Temperature: {settingsForm.temperature?.toFixed(2) ?? "0.10"}
                         </label>

@@ -53,6 +53,9 @@ _THUMB_DIR = Path("/data/thumbnails")
 _THUMB_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/thumbnails", StaticFiles(directory=str(_THUMB_DIR)), name="thumbnails")
 
+# Create ComfyUI images directory (used as temp storage before embedding into PPTX)
+Path("/data/comfyui_images").mkdir(parents=True, exist_ok=True)
+
 
 @app.get("/health", tags=["系統"])
 async def health():

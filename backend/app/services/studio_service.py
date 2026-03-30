@@ -610,6 +610,17 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> 
         pptx_path = persistent_dir / "slides.pptx"
         shutil.copy2(pptx_tmp, pptx_path)
 
+        # Optional: add AI-generated illustrations via ComfyUI (non-fatal if unavailable)
+        from app.routers.settings import _runtime_settings as _rs_slides
+        from app.services import comfyui_service
+        if _rs_slides.comfyui_api_url and await comfyui_service.is_available():
+            try:
+                from app.schemas.slides import SlidesSpec
+                spec = SlidesSpec.model_validate_json(spec_json)
+                await _add_illustrations_to_pptx(artifact_id, pptx_path, spec)
+            except Exception:
+                logging.exception("ComfyUI illustration step failed for artifact=%d — skipping", artifact_id)
+
         update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
         try:
             await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
@@ -650,6 +661,222 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> 
             artifact_id, elapsed,
         )
         update_studio_artifact(artifact_id, status="done", progress_message="")
+
+
+# ── ComfyUI slide illustration helpers ────────────────────────────────────────
+
+_SLIDE_ILLUSTRATION_PROMPT = """\
+You are an expert at creating image prompts for business presentation slides.
+Write ONE English image generation prompt for Flux AI based on the slide details below.
+
+CRITICAL RULES:
+- Output must be 100% English — Flux does not support Chinese
+- Visually represent the SPECIFIC topic using relevant objects/icons, NOT generic nature or landscapes
+- Topic-to-visual mapping examples:
+    AI / machine learning  → neural network, circuit nodes, data streams, robot icon
+    compliance / legal     → shield, document, checkmark, balance scale, seal, lock
+    risk / security        → shield, lock, firewall, warning icon, protected layers
+    data / metrics         → bar chart, dashboard, data nodes, graph, analytics
+    process / workflow     → flowchart arrows, gear, pipeline, connected steps
+    finance / investment   → coins, chart arrow, growth bar, currency symbol
+
+Style instructions:
+- Flat vector illustration, clean minimal, corporate color palette
+- Light or white background; avoid dark moody scenes
+- No human faces; no text or letters in the image
+- Landscape 4:3 format suitable as a slide visual
+
+Slide layout : {layout}
+Slide title  : {title}
+Slide content: {content_hint}
+
+Output ONLY the prompt (20-45 words), nothing else:"""
+
+# Layouts worth illustrating.
+# Only layouts that have a natural empty zone for an image:
+#   cover          – right-half panel (text is confined to left 60%)
+#   section_divider – full-page background (image sent to back layer)
+#   content_with_icon – icon+text on left, right third is empty
+# Excluded: big_number / card_grid / dual_column / process_flow
+#   (cards/columns fill the full slide width — any image would overlap content)
+_ILLUSTRATABLE_LAYOUTS = frozenset(
+    {"cover", "section_divider", "content_with_icon"}
+)
+
+# Max illustrations per presentation to avoid very long generation times
+_MAX_ILLUSTRATIONS = 5
+
+# ComfyUI images temp directory
+_COMFYUI_IMG_ROOT = Path("/data/comfyui_images")
+
+
+async def _generate_image_prompts_for_slides(
+    eligible: list[tuple[int, object]],
+) -> list[str | None]:
+    """
+    Use LLM to generate English image generation prompts for each eligible slide.
+    Returns a list of prompt strings (or None if generation fails per slide).
+    """
+    from app.routers.settings import _runtime_settings as _rs
+
+    prompts: list[str | None] = []
+    client = _fresh_async_client()
+    llm = get_llm(async_client=client)
+
+    try:
+        for _slide_idx, slide_data in eligible:
+            title = getattr(slide_data, "title", "") or getattr(slide_data, "quote", "") or ""
+            layout = getattr(slide_data, "layout", "")
+
+            # Build a content hint from available slide fields so the LLM
+            # can generate a topically relevant prompt instead of guessing.
+            hint_parts: list[str] = []
+            subtitle = getattr(slide_data, "subtitle", "") or getattr(slide_data, "description", "")
+            if subtitle:
+                hint_parts.append(subtitle)
+            bullets: list = getattr(slide_data, "bullets", []) or []
+            if bullets:
+                hint_parts.extend(str(b) for b in bullets[:3])  # first 3 bullets
+            # For card_grid / dual_column layouts, grab card titles
+            cards: list = getattr(slide_data, "cards", []) or []
+            if cards:
+                hint_parts.extend(getattr(c, "title", "") for c in cards[:3])
+            content_hint = "; ".join(p for p in hint_parts if p) or "(none)"
+
+            user_msg = _SLIDE_ILLUSTRATION_PROMPT.format(
+                layout=layout, title=title, content_hint=content_hint
+            )
+            messages = [ChatMessage(role=MessageRole.USER, content=user_msg)]
+            try:
+                parts: list[str] = []
+                async for chunk in await llm.astream_chat(messages):
+                    if chunk.delta:
+                        parts.append(chunk.delta)
+                img_prompt = "".join(parts).strip()
+                prompts.append(img_prompt if img_prompt else None)
+            except Exception:
+                logging.exception("Image prompt LLM call failed for slide_idx=%d", _slide_idx)
+                prompts.append(None)
+    finally:
+        await client.aclose()
+
+    return prompts
+
+
+def _embed_images_in_pptx(
+    pptx_path: Path,
+    slides_info: list[tuple[int, object]],
+    image_paths: list[Path | None],
+) -> None:
+    """
+    Open the PPTX with python-pptx and embed generated illustrations.
+    Positions vary by layout:
+      - cover: right half large image
+      - section_divider: full-page background (sent to back)
+      - others: right-side inset
+    Non-fatal: skips individual images that fail.
+    """
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation(str(pptx_path))
+    modified = False
+
+    for (slide_idx, slide_data), img_path in zip(slides_info, image_paths):
+        if img_path is None or not img_path.exists():
+            continue
+        if slide_idx >= len(prs.slides):
+            continue
+
+        sld = prs.slides[slide_idx]
+        layout = getattr(slide_data, "layout", "")
+
+        try:
+            if layout == "section_divider":
+                # Full-page background — add picture then send to back
+                pic = sld.shapes.add_picture(str(img_path), Inches(0), Inches(0), Inches(10), Inches(5.625))
+                sp = pic._element
+                sld.shapes._spTree.remove(sp)
+                sld.shapes._spTree.insert(2, sp)  # behind all other elements
+            elif layout == "cover":
+                # Right-panel illustration — starts at 60% width, full height
+                # Title text is left-aligned so stays within the left 60%
+                sld.shapes.add_picture(str(img_path), Inches(6.0), Inches(0), Inches(4.0), Inches(5.625))
+            else:
+                # content_with_icon: icon+text block is on the left, right third is empty
+                sld.shapes.add_picture(str(img_path), Inches(7.2), Inches(1.5), Inches(2.4), Inches(2.4))
+            modified = True
+            logging.info("Embedded illustration for slide %d (layout=%s)", slide_idx, layout)
+        except Exception:
+            logging.exception("Failed to embed image for slide %d", slide_idx)
+
+    if modified:
+        prs.save(str(pptx_path))
+        logging.info("PPTX saved with illustrations: %s", pptx_path)
+
+
+async def _add_illustrations_to_pptx(
+    artifact_id: int,
+    pptx_path: Path,
+    spec: object,
+) -> None:
+    """
+    Generate ComfyUI illustrations for eligible slides and embed them into the PPTX.
+    Non-fatal: any failure is logged and silently skipped.
+    """
+    from app.services.comfyui_service import generate_image as comfyui_generate
+
+    slides = getattr(spec, "slides", [])
+    eligible = [
+        (i, s) for i, s in enumerate(slides)
+        if getattr(s, "layout", "") in _ILLUSTRATABLE_LAYOUTS
+    ][:_MAX_ILLUSTRATIONS]
+
+    if not eligible:
+        logging.info("No illustratable slides found for artifact=%d", artifact_id)
+        return
+
+    logging.info("Generating ComfyUI illustrations for %d slides (artifact=%d)", len(eligible), artifact_id)
+    update_studio_artifact(artifact_id, progress_message=f"正在生成投影片插圖 (0/{len(eligible)})…")
+
+    # Step 1: Generate English prompts via LLM
+    img_prompts = await _generate_image_prompts_for_slides(eligible)
+
+    # Step 2: Generate images via ComfyUI (max 2 concurrent)
+    img_dir = _COMFYUI_IMG_ROOT / str(artifact_id)
+    img_dir.mkdir(parents=True, exist_ok=True)
+
+    sem = asyncio.Semaphore(2)
+    image_paths: list[Path | None] = [None] * len(eligible)
+    completed = [0]
+
+    async def gen_one(idx: int, prompt: str | None) -> None:
+        if not prompt:
+            return
+        async with sem:
+            save_path = img_dir / f"slide_{eligible[idx][0]:03d}.png"
+            ok = await comfyui_generate(prompt, save_path)
+            if ok:
+                image_paths[idx] = save_path
+            completed[0] += 1
+            update_studio_artifact(
+                artifact_id,
+                progress_message=f"正在生成投影片插圖 ({completed[0]}/{len(eligible)})…",
+            )
+
+    await asyncio.gather(*[gen_one(i, p) for i, p in enumerate(img_prompts)])
+
+    success_count = sum(1 for p in image_paths if p is not None)
+    if success_count == 0:
+        logging.warning("ComfyUI: no illustrations generated for artifact=%d", artifact_id)
+        return
+
+    # Step 3: Embed images into PPTX
+    await asyncio.to_thread(_embed_images_in_pptx, pptx_path, eligible, image_paths)
+    logging.info(
+        "ComfyUI illustrations: %d/%d embedded for artifact=%d",
+        success_count, len(eligible), artifact_id,
+    )
 
 
 async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:

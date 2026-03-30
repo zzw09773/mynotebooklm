@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     slides_model: str = ""   # Optional: dedicated model for slides generation (empty = use llm_model)
     vlm_dpi: int = 96  # DPI for VLM image rendering (higher = better quality, slower)
 
+    # ── ComfyUI ───────────────────────────────────────────────
+    comfyui_api_url: str = ""  # e.g. "http://127.0.0.1:8188" (empty = disabled)
+
     # ── Data paths ───────────────────────────────────────────
     upload_dir: str = os.getenv("UPLOAD_DIR", "/data/uploads")
     chroma_db_dir: str = os.getenv("CHROMA_DB_DIR", "/data/chroma_db")

@@ -1,0 +1,394 @@
+commit 475d14f6a2a54aae1a5cd9c6f6d314457790787c
+Author: AIA Assistant <aia@example.com>
+Date:   Mon Mar 23 07:32:28 2026 +0000
+
+    feat: 增加對孤立生成物和縮略圖的清理功能，優化 LLM 客戶端管理
+
+diff --git a/backend/app/models.py b/backend/app/models.py
+index 2e9f5b0..27baaca 100644
+--- a/backend/app/models.py
++++ b/backend/app/models.py
+@@ -3,7 +3,9 @@ Project database models using SQLModel (SQLite).
+ """
+ import logging
+ import os
++import shutil
+ from datetime import datetime, timezone
++from pathlib import Path
+ from typing import Optional
+ 
+ from sqlmodel import SQLModel, Field, Session, create_engine, select
+@@ -59,6 +61,10 @@ def init_db():
+     SQLModel.metadata.create_all(_engine)
+     # Migrate: add new columns to existing tables
+     _run_migrations()
++    # Reset orphaned 'generating' artifacts from previous server runs
++    _reset_orphaned_artifacts()
++    # Remove thumbnail dirs for artifacts that no longer exist
++    _cleanup_orphaned_thumbnails()
+ 
+ def _run_migrations():
+     """Add new columns to existing tables if they don't exist."""
+@@ -95,6 +101,46 @@ def _run_migrations():
+         conn.close()
+ 
+ 
++def _reset_orphaned_artifacts():
++    """Reset artifacts stuck in 'generating' from a previous server run."""
++    import sqlite3
++    conn = sqlite3.connect(_DB_PATH)
++    try:
++        cur = conn.execute(
++            "UPDATE studioartifact SET status='pending', progress_message=''"
++            " WHERE status='generating'"
++        )
++        if cur.rowcount:
++            logging.warning("Reset %d orphaned 'generating' artifact(s) to 'pending'", cur.rowcount)
++        conn.commit()
++    except sqlite3.OperationalError:
++        pass  # table may not exist yet
++    finally:
++        conn.close()
++
++
++def _cleanup_orphaned_thumbnails():
++    """Remove thumbnail dirs for artifacts that no longer exist in DB."""
++    import sqlite3
++    thumb_root = Path("/data/thumbnails")
++    if not thumb_root.exists():
++        return
++    conn = sqlite3.connect(_DB_PATH)
++    try:
++        existing_ids = {
++            str(r[0])
++            for r in conn.execute("SELECT id FROM studioartifact").fetchall()
++        }
++    except sqlite3.OperationalError:
++        return  # table may not exist yet
++    finally:
++        conn.close()
++    for d in thumb_root.iterdir():
++        if d.is_dir() and d.name not in existing_ids:
++            shutil.rmtree(d)
++            logging.warning("Removed orphaned thumbnail dir: %s", d)
++
++
+ # ── Persisted settings (survive restarts) ─────────────────────
+ 
+ class PersistedSetting(SQLModel, table=True):
+@@ -211,10 +257,11 @@ def delete_project(project_id: int) -> bool:
+         ).all()
+         for s in summaries:
+             session.delete(s)
+-        # Delete studio artifacts
++        # Delete studio artifacts and collect IDs for thumbnail cleanup
+         artifacts = session.exec(
+             select(StudioArtifact).where(StudioArtifact.project_id == project_id)
+         ).all()
++        artifact_ids = [a.id for a in artifacts]
+         for a in artifacts:
+             session.delete(a)
+         # Delete conversations and their messages
+@@ -231,6 +278,14 @@ def delete_project(project_id: int) -> bool:
+         session.delete(project)
+         session.commit()
+ 
++    # Clean up studio artifact thumbnails and PPTX files on disk
++    _THUMBNAILS_DIR = Path("/data/thumbnails")
++    for aid in artifact_ids:
++        thumb_dir = _THUMBNAILS_DIR / str(aid)
++        if thumb_dir.exists():
++            shutil.rmtree(thumb_dir)
++            logging.info("Deleted thumbnail dir: %s", thumb_dir)
++
+     # Clean up ChromaDB collections and uploaded files outside session
+     from app.services.document_service import delete_document
+     for collection_name, file_path in doc_info:
+diff --git a/backend/app/services/llm_service.py b/backend/app/services/llm_service.py
+index 73a6060..8b87515 100644
+--- a/backend/app/services/llm_service.py
++++ b/backend/app/services/llm_service.py
+@@ -19,19 +19,32 @@ _async_http_client = httpx.AsyncClient(
+     timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
+ )
+ 
++_ASYNC_CLIENT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+ 
+-def get_llm() -> OpenAILike:
+-    """Return a configured LLM instance pointing to the local API."""
++
++def _fresh_async_client() -> httpx.AsyncClient:
++    """Return a new AsyncClient. Use for streaming requests to avoid stale
++    connection pool state after asyncio cancellation."""
++    return httpx.AsyncClient(verify=False, timeout=_ASYNC_CLIENT_TIMEOUT)
++
++
++def get_llm(async_client: httpx.AsyncClient | None = None) -> OpenAILike:
++    """Return a configured LLM instance pointing to the local API.
++
++    Pass async_client to use a dedicated client (e.g. for streaming, where
++    asyncio cancellation can corrupt the shared pool).
++    """
++    from app.routers.settings import _runtime_settings
+     llm = OpenAILike(
+-        api_base=settings.llm_api_base_url,
+-        api_key=settings.llm_api_key,
+-        model=settings.llm_model,
+-        temperature=settings.temperature,
++        api_base=_runtime_settings.llm_api_base_url or settings.llm_api_base_url,
++        api_key=_runtime_settings.llm_api_key or settings.llm_api_key,
++        model=_runtime_settings.llm_model or settings.llm_model,
++        temperature=_runtime_settings.temperature,
+         is_chat_model=True,
+         is_function_calling_model=False,
+-        max_tokens=settings.llm_max_tokens,
++        max_tokens=_runtime_settings.llm_max_tokens,
+         http_client=_http_client,
+-        async_http_client=_async_http_client,
++        async_http_client=async_client or _async_http_client,
+     )
+     return llm
+ 
+diff --git a/backend/app/services/pptx_runner_service.py b/backend/app/services/pptx_runner_service.py
+index d1836cc..c6aa5e0 100644
+--- a/backend/app/services/pptx_runner_service.py
++++ b/backend/app/services/pptx_runner_service.py
+@@ -30,6 +30,16 @@ class RunResult(str, Enum):
+     TIMEOUT = "timeout"             # process killed due to timeout
+ 
+ 
++# Default preamble injected when the LLM omits it (tech-innovation theme).
++# This prevents "theme is not defined" / "FONT is not defined" runtime errors.
++_DEFAULT_PREAMBLE = """\
++pres.defineLayout({name:"16x9",width:10,height:5.625});
++pres.layout="16x9";
++var theme={bg:"1E1E1E",accent:"0066FF",title:"FFFFFF",text:"CCCCCC",muted:"888888",cardBg:"2A2A2A"};
++var FONT="Microsoft JhengHei";
++"""
++
++
+ def _preprocess_code(code: str) -> str:
+     """
+     Fix common LLM code-generation mistakes before passing to Node.js runner.
+@@ -47,6 +57,23 @@ def _preprocess_code(code: str) -> str:
+         lines.pop()
+     code = "\n".join(lines)
+ 
++    # Inject preamble if LLM forgot to define theme/FONT/layout.
++    # The check is simple: if neither "var theme" nor "const theme" appears in
++    # the code, the LLM skipped the preamble and "theme is not defined" would
++    # occur at runtime.  Prepending the default preamble fixes this without
++    # touching any slide content.
++    if "theme" not in code:
++        log.warning("LLM output missing 'theme' definition — injecting default preamble")
++        code = _DEFAULT_PREAMBLE + code
++    elif not code.lstrip().startswith("pres.defineLayout"):
++        # theme is defined somewhere but defineLayout is missing at the top
++        if "pres.defineLayout" not in code:
++            log.warning("LLM output missing pres.defineLayout — injecting layout header")
++            code = (
++                'pres.defineLayout({name:"16x9",width:10,height:5.625});\npres.layout="16x9";\n'
++                + code
++            )
++
+     # Note: automatic quote-mismatch repair ("value' → "value") is intentionally
+     # NOT done here — the regex cannot safely distinguish mismatched quotes from
+     # valid JS like '"'  (a string containing a single double-quote character).
+diff --git a/backend/app/services/studio_service.py b/backend/app/services/studio_service.py
+index 9b5b825..a0b74c9 100644
+--- a/backend/app/services/studio_service.py
++++ b/backend/app/services/studio_service.py
+@@ -13,7 +13,7 @@ from pathlib import Path
+ 
+ from llama_index.core.llms import ChatMessage, MessageRole
+ 
+-from app.services.llm_service import get_llm
++from app.services.llm_service import get_llm, _fresh_async_client
+ from app.services.summary_service import _collect_document_text
+ from app.models import (
+     list_project_documents,
+@@ -74,8 +74,13 @@ desert-rose(時尚精品):E8D5C4/B87D6D/5D2E46/5D2E46/D4A5A5/F0E4D8
+ ═══ 固定開頭 ═══
+ pres.defineLayout({name:"16x9",width:10,height:5.625});
+ pres.layout="16x9";
+-const theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
+-const FONT="Microsoft JhengHei";
++var theme={bg:"...",accent:"...",title:"...",text:"...",muted:"...",cardBg:"..."};
++var FONT="Microsoft JhengHei";
++
++═══ 每張投影片（必須）═══
++var sld = pres.addSlide({bkgd:theme.bg});
++// 接著用 sld.addText / sld.addShape / addIcon(sld,...) 排版
++// 每張新投影片都要重新 var sld = pres.addSlide({bkgd:theme.bg});
+ 
+ ═══ 共用標題（cover/section_divider/quote_slide除外）═══
+ sld.addShape(pres.ShapeType.rect,{x:0,y:0,w:10,h:0.06,fill:{color:theme.accent}});
+@@ -88,7 +93,7 @@ sld.addText("標題",{x:0.5,y:0.2,w:9,h:0.6,fontSize:24,color:theme.title,fontFa
+ 【section_divider】bg=accent。"SECTION 0N"x:0.6,y:1.2,fontSize:14,color:bg,charSpacing:4。標題x:0.6,y:1.8,fontSize:36,color:FFFFFF。描述x:0.6,y:3.3。
+ 
+ 【big_number — 多數字並排（關鍵範例）】
+-const stats=[{num:"16",unit:"分鐘",label:"出場時間"},{num:"8.2",unit:"分",label:"場均得分"},{num:"+3",unit:"",label:"正負值"}];
++const stats=[{num:"N1",unit:"單位1",label:"指標一"},{num:"N2",unit:"單位2",label:"指標二"},{num:"N3",unit:"單位3",label:"指標三"}];
+ const cardW=2.7,gap=0.45,startX=(10-(stats.length*cardW+(stats.length-1)*gap))/2;
+ stats.forEach((s,i)=>{
+   const cx=startX+i*(cardW+gap);
+@@ -129,11 +134,12 @@ PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
+ 
+ ═══ 規則 ═══
+ - (x+w)≤9.7, (y+h)≤5.5。N卡片：totalW=N*cardW+(N-1)*gap≤9.3, startX=(10-totalW)/2
+-- 只用文件真實數據，禁止編造數字/引言。全部繁體中文不混簡體
++- 只用文件真實數據，禁止編造數字/引言。範例中的佔位符（N1、指標一等）必須替換為文件內容。全部繁體中文不混簡體
+ - 標題≤15字，要點≤25字。所有addText加shrinkText:true。addIcon的colorHex加"#"
+ - 不連續兩頁同版面。一頁最多4卡片/5步驟。數字用big_number不用bullet
+ 
+ ═══ 程式碼規則（違反會造成執行錯誤）═══
++- 每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg})，再用 sld 排版
+ - 所有字串用雙引號（"），禁用單引號（'）
+ - 每個變數名只宣告一次，不同投影片請用不同名稱（如 items1/items2，cx1/cx2）
+ - 程式碼結尾只到最後一個 JS 語句（};），不加 ---、//、說明文字
+@@ -142,7 +148,7 @@ PIE:x:2.5,y:1.2,w:5,h:3.8,showPercent:true。
+ - 禁止使用 let/const（已由 runner 轉換，但直接用 var 更安全）
+ 
+ ═══ 輸出 ═══
+-只輸出JS。從pres.defineLayout(...)開始。不加```或說明。不呼叫writeFile()。
++只輸出JS。第一行必須是 pres.defineLayout(...)，第二行是 pres.layout="16x9"，第三行是 var theme={...}，第四行是 var FONT="Microsoft JhengHei"。缺少這四行會造成執行錯誤。不加```或說明。不呼叫writeFile()。
+ 12-16頁。首頁cover末頁conclusion。≥5種版面。≥5頁用addIcon。
+ """
+ 
+@@ -307,6 +313,7 @@ _TEXT_ONLY_TYPES = {"video_script", "report"}
+ _MAX_PER_DOC_CHARS = 8000
+ _MAX_TOTAL_CHARS = 20000
+ _PROGRESS_UPDATE_EVERY = 500  # chars between DB progress updates
++_STREAM_TIMEOUT_SECS = 300    # max seconds to wait for LLM streaming (including first-token latency)
+ 
+ 
+ def _strip_code_fence(raw: str) -> str:
+@@ -383,7 +390,11 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+         prompt = ARTIFACT_PROMPTS[artifact_type]
+         user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
+ 
+-        llm = get_llm()
++        # Use a fresh AsyncClient per generation to avoid stale connection
++        # pool state after asyncio cancellation (previous timeout can corrupt
++        # the shared pool, causing the next streaming request to receive 0 bytes).
++        _stream_client = _fresh_async_client()
++        llm = get_llm(async_client=_stream_client)
+         messages = [
+             ChatMessage(role=MessageRole.SYSTEM, content=prompt),
+             ChatMessage(role=MessageRole.USER, content=user_msg),
+@@ -391,21 +402,40 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+ 
+         update_studio_artifact(artifact_id, progress_message="AI 正在生成內容，請耐心等候…")
+ 
+-        # Use streaming to avoid httpx.ReadTimeout on long JSON responses
+-        # (non-streaming waits for the full response before the first byte arrives)
++        # Use streaming to avoid httpx.ReadTimeout on long JSON responses.
++        # Wrap with asyncio.timeout so a completely unresponsive model
++        # doesn't hang the task forever (the model can take ~70s before
++        # the first token for complex prompts like SLIDES_PROMPT).
+         raw_parts: list[str] = []
+         total_chars = 0
+         last_progress_chars = 0
+-        async for chunk in await llm.astream_chat(messages):
+-            if chunk.delta:
+-                raw_parts.append(chunk.delta)
+-                total_chars += len(chunk.delta)
+-                if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
+-                    last_progress_chars = total_chars
+-                    update_studio_artifact(
+-                        artifact_id,
+-                        progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
+-                    )
++        try:
++            async with asyncio.timeout(_STREAM_TIMEOUT_SECS):
++                async for chunk in await llm.astream_chat(messages):
++                    if chunk.delta:
++                        raw_parts.append(chunk.delta)
++                        total_chars += len(chunk.delta)
++                        if total_chars - last_progress_chars >= _PROGRESS_UPDATE_EVERY:
++                            last_progress_chars = total_chars
++                            update_studio_artifact(
++                                artifact_id,
++                                progress_message=f"AI 正在生成…已產生約 {total_chars} 字",
++                            )
++        except TimeoutError:
++            logging.warning(
++                "LLM streaming timed out after %ds for artifact %d (got %d chars)",
++                _STREAM_TIMEOUT_SECS, artifact_id, total_chars,
++            )
++            if not raw_parts:
++                update_studio_artifact(
++                    artifact_id,
++                    status="error",
++                    error_message=f"AI 回應逾時（{_STREAM_TIMEOUT_SECS} 秒內未產生內容），請稍後重試。",
++                )
++                return
++            # Got partial content — try to use what we have
++        finally:
++            await _stream_client.aclose()
+         raw = "".join(raw_parts).strip()
+         raw = _strip_code_fence(raw)
+ 
+@@ -462,19 +492,21 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+ _THUMB_ROOT = Path("/data/thumbnails")
+ 
+ 
+-async def _fix_pptxgenjs_syntax(code: str, error_msg: str) -> str:
++async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:
+     """
+-    Ask the LLM to fix a syntax error in PptxGenJS code.
++    Ask the LLM to fix an error in PptxGenJS code.
+     Returns the corrected code, or the original code if the fix attempt fails.
+     """
+-    llm = get_llm()
+     fix_prompt = (
+-        "以下 PptxGenJS 程式碼有語法錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
++        "以下 PptxGenJS 程式碼執行時發生錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
+         "不加任何說明或 markdown 標記。\n\n"
++        "重要提醒：每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg}) 才能使用 sld。\n\n"
+         f"錯誤訊息：{error_msg}\n\n"
+         f"程式碼：\n{code}"
+     )
+     messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
++    fix_client = _fresh_async_client()
++    llm = get_llm(async_client=fix_client)
+     try:
+         parts: list[str] = []
+         async for chunk in await llm.astream_chat(messages):
+@@ -484,15 +516,17 @@ async def _fix_pptxgenjs_syntax(code: str, error_msg: str) -> str:
+         fixed = _strip_code_fence(fixed)
+         return fixed if fixed else code
+     except Exception:
+-        logging.exception("Syntax fix LLM call failed for artifact — using original code")
++        logging.exception("Code fix LLM call failed for artifact — using original code")
+         return code
++    finally:
++        await fix_client.aclose()
+ 
+ 
+ async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
+     """
+     Background task for slides:
+       1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
+-         On SyntaxError: ask LLM to fix and retry once.
++         On SyntaxError or RuntimeError: ask LLM to fix and retry once.
+       2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
+       3. Convert .pptx → JPEG thumbnails (soffice → fitz)
+     """
+@@ -505,11 +539,11 @@ async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> Non
+ 
+         result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+ 
+-        # On syntax error: ask LLM to fix then retry once
+-        if result == RunResult.SYNTAX_ERROR:
+-            logging.warning("PptxGenJS syntax error for artifact %d — asking LLM to fix", artifact_id)
+-            update_studio_artifact(artifact_id, progress_message="偵測到語法錯誤，正在要求 AI 修正…")
+-            pptxgenjs_code = await _fix_pptxgenjs_syntax(pptxgenjs_code, stderr)
++        # On syntax or runtime error: ask LLM to fix then retry once
++        if result in (RunResult.SYNTAX_ERROR, RunResult.RUNTIME_ERROR):
++            logging.warning("PptxGenJS %s for artifact %d — asking LLM to fix", result.value, artifact_id)
++            update_studio_artifact(artifact_id, progress_message="偵測到執行錯誤，正在要求 AI 修正…")
++            pptxgenjs_code = await _fix_pptxgenjs_code(pptxgenjs_code, stderr)
+             update_studio_artifact(artifact_id, progress_message="重新執行修正後的程式碼…")
+             # Remove stale output file from first attempt before retry
+             Path(pptx_tmp).unlink(missing_ok=True)

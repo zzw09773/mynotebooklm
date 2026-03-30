@@ -16,6 +16,8 @@ services:
     ports:
       - 8100:8000
     restart: always
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - notebooklm_network
 

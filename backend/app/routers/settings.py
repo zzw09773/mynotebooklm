@@ -45,6 +45,8 @@ def _build_runtime_settings():
         base.vision_model = persisted["vision_model"]
     if persisted.get("slides_model") is not None:
         base.slides_model = persisted["slides_model"]
+    if persisted.get("comfyui_api_url") is not None:
+        base.comfyui_api_url = persisted["comfyui_api_url"]
     return base
 
 
@@ -71,6 +73,7 @@ class SettingsResponse(BaseModel):
     llm_max_tokens: int
     vision_model: str
     slides_model: str
+    comfyui_api_url: str
 
 
 class SettingsUpdate(BaseModel):
@@ -84,6 +87,7 @@ class SettingsUpdate(BaseModel):
     llm_max_tokens: int | None = None
     vision_model: str | None = None
     slides_model: str | None = None
+    comfyui_api_url: str | None = None
 
 
 class ModelInfo(BaseModel):
@@ -110,6 +114,7 @@ async def get_current_settings(current_user: User = Depends(get_current_user)):
         llm_max_tokens=_runtime_settings.llm_max_tokens,
         vision_model=_runtime_settings.vision_model,
         slides_model=_runtime_settings.slides_model,
+        comfyui_api_url=_runtime_settings.comfyui_api_url,
     )
 
 
@@ -147,6 +152,9 @@ async def update_settings(update: SettingsUpdate, current_user: User = Depends(g
     if update.slides_model is not None:
         _runtime_settings.slides_model = update.slides_model
         changed["slides_model"] = update.slides_model
+    if update.comfyui_api_url is not None:
+        _runtime_settings.comfyui_api_url = update.comfyui_api_url
+        changed["comfyui_api_url"] = update.comfyui_api_url
 
     # Persist to DB so settings survive restarts
     for key, value in changed.items():

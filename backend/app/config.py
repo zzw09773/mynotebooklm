@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 50
 
     # ── RAG settings ─────────────────────────────────────────
-    chunk_size: int = 512
-    chunk_overlap: int = 64
+    chunk_size: int = 480  # nv-embed-v2 max is 512; leave buffer for sentence boundary
+    chunk_overlap: int = 48
     top_k: int = 5
     temperature: float = 0.1
 

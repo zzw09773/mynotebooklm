@@ -133,7 +133,7 @@ Icon 選用三規則：
 
 | 欄位 | 上限 |
 |------|------|
-| 所有版面 title | 15字 |
+| 所有版面 title | 20字 |
 | cover subtitle | 30字 |
 | section_divider description | 40字 |
 | process_flow step description | 40字 |
@@ -141,7 +141,7 @@ Icon 選用三規則：
 | big_number value | 10字 |
 | big_number unit / label | 10 / 15字 |
 | quote_slide quote | 60字 |
-| table header cell | 15字 |
+| table header cell | 20字 |
 | table data cell | 20字 |
 | speaker_notes | 50–200字 |
 

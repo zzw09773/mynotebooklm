@@ -19,7 +19,7 @@ class SlideBase(BaseModel):
 
 class CoverSlide(SlideBase):
     layout: Literal["cover"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     subtitle: str | None = Field(default=None, max_length=30)
 
 
@@ -30,7 +30,7 @@ class CoverSlide(SlideBase):
 class SectionDividerSlide(SlideBase):
     layout: Literal["section_divider"]
     label: str | None = None
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     description: str | None = Field(default=None, max_length=40)
 
 
@@ -46,7 +46,7 @@ class BigNumberItem(BaseModel):
 
 class BigNumberSlide(SlideBase):
     layout: Literal["big_number"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     items: list[BigNumberItem] = Field(min_length=1, max_length=3)
 
 
@@ -56,13 +56,13 @@ class BigNumberSlide(SlideBase):
 
 class CardItem(BaseModel):
     icon: str | None = None
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     description: str | None = Field(default=None, max_length=40)
 
 
 class CardGridSlide(SlideBase):
     layout: Literal["card_grid"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     cards: list[CardItem] = Field(min_length=2, max_length=4)
 
 
@@ -72,13 +72,13 @@ class CardGridSlide(SlideBase):
 
 class DualColumnSide(BaseModel):
     icon: str | None = None
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     points: list[Annotated[str, Field(max_length=25)]] = Field(min_length=1, max_length=5)
 
 
 class DualColumnSlide(SlideBase):
     layout: Literal["dual_column"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     left: DualColumnSide
     right: DualColumnSide
 
@@ -88,13 +88,13 @@ class DualColumnSlide(SlideBase):
 # ---------------------------------------------------------------------------
 
 class ProcessStep(BaseModel):
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     description: str | None = Field(default=None, max_length=40)
 
 
 class ProcessFlowSlide(SlideBase):
     layout: Literal["process_flow"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     steps: list[ProcessStep] = Field(min_length=3, max_length=5)
 
 
@@ -103,13 +103,13 @@ class ProcessFlowSlide(SlideBase):
 # ---------------------------------------------------------------------------
 
 class ContentBlock(BaseModel):
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     description: str = Field(max_length=40)
 
 
 class ContentWithIconSlide(SlideBase):
     layout: Literal["content_with_icon"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     icon: str | None = None
     blocks: list[ContentBlock] = Field(min_length=1, max_length=4)
 
@@ -130,8 +130,8 @@ class QuoteSlide(SlideBase):
 
 class TableSlide(SlideBase):
     layout: Literal["table"]
-    title: str = Field(max_length=15)
-    headers: list[Annotated[str, Field(max_length=15)]] = Field(min_length=2, max_length=8)
+    title: str = Field(max_length=20)
+    headers: list[Annotated[str, Field(max_length=20)]] = Field(min_length=2, max_length=8)
     rows: list[list[Annotated[str, Field(max_length=20)]]] = Field(min_length=1, max_length=12)
 
     @model_validator(mode='after')
@@ -151,7 +151,7 @@ class TableSlide(SlideBase):
 
 class ChartSlide(SlideBase):
     layout: Literal["chart"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     chart_type: Literal["BAR", "PIE"]
     labels: list[str] = Field(min_length=2, max_length=8)
     values: list[float] = Field(min_length=2, max_length=8)
@@ -176,7 +176,7 @@ class ConclusionPoint(BaseModel):
 
 class ConclusionSlide(SlideBase):
     layout: Literal["conclusion"]
-    title: str = Field(max_length=15)
+    title: str = Field(max_length=20)
     summary: str | None = Field(default=None, max_length=40)
     points: list[ConclusionPoint] = Field(min_length=1, max_length=5)
 

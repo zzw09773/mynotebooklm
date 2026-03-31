@@ -20,6 +20,12 @@ function addSlide(pres, theme) {
     return { sld, t: theme };
 }
 
+function addSpeakerNotes(sld, data) {
+    if (data && data.speaker_notes) {
+        sld.addNotes(data.speaker_notes);
+    }
+}
+
 function addHeader(sld, t, titleText) {
     // Accent top bar
     sld.addShape("rect", { x: 0, y: 0, w: 10, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
@@ -41,6 +47,7 @@ function renderCover(pres, theme, data) {
     }
     // Bottom-right block
     sld.addShape("rect", { x: 8.8, y: 4.6, w: 1, h: 0.8, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
+    addSpeakerNotes(sld, data);
 }
 
 function renderSectionDivider(pres, theme, data) {
@@ -57,6 +64,7 @@ function renderSectionDivider(pres, theme, data) {
     if (data.description) {
         sld.addText(data.description, { x: 0.8, y: 3.3, w: 8.4, h: 0.6, fontSize: 16, color: "FFFFFF", fontFace: FONT, shrinkText: true });
     }
+    addSpeakerNotes(sld, data);
 }
 
 function renderBigNumber(pres, theme, data) {
@@ -78,11 +86,15 @@ function renderBigNumber(pres, theme, data) {
         const gap = 0.45;
         const totalW = N * cardW + (N - 1) * gap;
         const startX = (10 - totalW) / 2;
+        const hasUnit = items.some(item => item.unit);
+        const hasLabel = items.some(item => item.label);
+        const cardH = 1.8 + (hasUnit ? 0.6 : 0) + (hasLabel ? 0.5 : 0) + 0.7; // min 3.0, approx
+        const cardHClamped = Math.min(3.6, Math.max(2.8, cardH));
         for (let i = 0; i < N; i++) {
             const item = items[i];
             const cx = startX + i * (cardW + gap);
             // Card background
-            sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 3.6, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
+            sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: cardHClamped, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
             // Accent top
             sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 0.08, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
             // Value
@@ -97,6 +109,7 @@ function renderBigNumber(pres, theme, data) {
             }
         }
     }
+    addSpeakerNotes(sld, data);
 }
 
 function renderCardGrid(pres, theme, data) {
@@ -107,11 +120,14 @@ function renderCardGrid(pres, theme, data) {
     const gap = 0.45;
     const totalW = N * cardW + (N - 1) * gap;
     const startX = (10 - totalW) / 2;
+    // Dynamic card height: shorter when descriptions are brief or absent
+    const hasDesc = data.cards.some(c => c.description && c.description.length > 0);
+    const cardH = hasDesc ? 3.6 : 2.4;
     for (let i = 0; i < N; i++) {
         const card = data.cards[i];
         const cx = startX + i * (cardW + gap);
         // Card background
-        sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 3.6, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
+        sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: cardH, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
         // Accent top
         sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 0.08, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
         // Icon
@@ -125,6 +141,7 @@ function renderCardGrid(pres, theme, data) {
             sld.addText(card.description, { x: cx + 0.1, y: 2.6, w: cardW - 0.2, h: 1.9, fontSize: 12, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
         }
     }
+    addSpeakerNotes(sld, data);
 }
 
 function renderDualColumn(pres, theme, data) {
@@ -153,8 +170,10 @@ function renderDualColumn(pres, theme, data) {
             }
         }
     }
-    // VS label in center
-    sld.addText("VS", { x: 4.55, y: 2.3, w: 0.9, h: 0.7, fontSize: 20, bold: true, color: t.accent, align: "center", fontFace: FONT, shrinkText: true });
+    // VS label in center — rendered AFTER cards so it appears on top (z-order)
+    sld.addShape("ellipse", { x: 4.35, y: 2.55, w: 1.3, h: 1.3, fill: { color: t.bg }, line: { color: t.accent, size: 2 } });
+    sld.addText("VS", { x: 4.35, y: 2.7, w: 1.3, h: 1.0, fontSize: 22, bold: true, color: t.accent, align: "center", valign: "middle", fontFace: FONT });
+    addSpeakerNotes(sld, data);
 }
 
 function renderProcessFlow(pres, theme, data) {
@@ -163,8 +182,10 @@ function renderProcessFlow(pres, theme, data) {
     const N = data.steps.length;
     const circR = 0.35;
     const circD = circR * 2; // 0.7
-    const startX = 0.5 + circR; // 0.85 (circle center x of first step)
-    const gap = (9.0 - N * circD) / (N - 1); // space between circles
+    const rawGap = (N === 1) ? 0 : (9.0 - N * circD) / (N - 1);
+    const gap = Math.min(rawGap, 2.0);   // max 2" gap between circles
+    const totalW = N * circD + (N - 1) * gap;
+    const startX = (10 - totalW) / 2 + circR;  // always center the group
 
     for (let i = 0; i < N; i++) {
         const step = data.steps[i];
@@ -186,6 +207,7 @@ function renderProcessFlow(pres, theme, data) {
             sld.addText(step.description, { x: cx - 0.6, y: 2.95, w: 1.2, h: 0.9, fontSize: 11, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
         }
     }
+    addSpeakerNotes(sld, data);
 }
 
 function renderContentWithIcon(pres, theme, data) {
@@ -207,6 +229,7 @@ function renderContentWithIcon(pres, theme, data) {
             sld.addText(block.description, { x: 2.0, y: yPos + 0.45, w: 7.5, h: 0.55, fontSize: 13, color: t.text, fontFace: FONT, shrinkText: true });
         }
     }
+    addSpeakerNotes(sld, data);
 }
 
 function renderQuote(pres, theme, data) {
@@ -223,6 +246,7 @@ function renderQuote(pres, theme, data) {
     if (data.source) {
         sld.addText("— " + data.source, { x: 1.2, y: 4.1, w: 7.6, h: 0.4, fontSize: 14, color: theme.muted, align: "center", fontFace: FONT, shrinkText: true });
     }
+    addSpeakerNotes(sld, data);
 }
 
 function renderTable(pres, theme, data) {
@@ -241,13 +265,22 @@ function renderTable(pres, theme, data) {
             options: { color: t.text, fill: { color: ri % 2 === 0 ? t.cardBg : t.bg }, fontSize: 12, fontFace: FONT }
         }))
     );
+    // Dynamic vertical centering: row height ~0.35", available area y=1.1..5.1 (4.0")
+    const rowH = 0.35;
+    const totalRows = 1 + data.rows.length; // header + data
+    const tableH = totalRows * rowH;
+    const availableTop = 1.1;
+    const availableH = 4.0;
+    const startY = availableTop + Math.max(0, (availableH - tableH) / 2);
     sld.addTable([headerRow, ...dataRows], {
         x: 0.5,
-        y: 1.1,
+        y: startY,
         w: 9,
         colW: Array(data.headers.length).fill(9 / data.headers.length),
-        border: { type: "none" }
+        border: { type: "none" },
+        rowH: rowH,
     });
+    addSpeakerNotes(sld, data);
 }
 
 function renderChart(pres, theme, data) {
@@ -269,8 +302,11 @@ function renderChart(pres, theme, data) {
         } else {
             // PIE
             sld.addChart(pres.ChartType.pie, chartData, {
-                x: 2.5, y: 1.2, w: 5, h: 3.8,
+                x: 2.5, y: 1.1, w: 5, h: 3.0,
                 showPercent: true,
+                showLegend: true,
+                legendPos: 'b',
+                legendFontSize: 11,
                 chartColors: [t.accent, t.muted, t.text, "4CAF50", "FF9800", "9C27B0", "F44336", "2196F3"],
                 dataLabelFontSize: 12,
             });
@@ -284,6 +320,7 @@ function renderChart(pres, theme, data) {
         ]);
         sld.addTable(rows, { x: 1.5, y: 1.3, w: 7, colW: [5, 2] });
     }
+    addSpeakerNotes(sld, data);
 }
 
 function renderConclusion(pres, theme, data) {
@@ -295,14 +332,18 @@ function renderConclusion(pres, theme, data) {
     // Accent line
     sld.addShape("rect", { x: 0.5, y: 1.35, w: 2, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
     // Summary (if present)
+    let pointsStartY = 1.9;
     if (data.summary) {
         sld.addText(data.summary, { x: 0.5, y: 1.55, w: 9, h: 0.55, fontSize: 16, italic: true, color: t.accent, fontFace: FONT, shrinkText: true });
+        pointsStartY = 2.15; // push points down when summary present
     }
-    // Points
+    // Points — dynamic spacing based on count to use available space
     if (data.points) {
+        const availH = 5.2 - pointsStartY;
+        const pointH = Math.min(1.0, availH / data.points.length);
         for (let i = 0; i < data.points.length; i++) {
             const point = data.points[i];
-            const yPos = 1.9 + i * 1.0;
+            const yPos = pointsStartY + i * pointH;
             // Point card background
             sld.addShape("rect", { x: 0.5, y: yPos, w: 9, h: 0.75, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.08 });
             // Icon
@@ -311,6 +352,7 @@ function renderConclusion(pres, theme, data) {
             sld.addText(point.text, { x: 1.2, y: yPos + 0.15, w: 8.1, h: 0.45, fontSize: 15, color: t.title, fontFace: FONT, shrinkText: true });
         }
     }
+    addSpeakerNotes(sld, data);
 }
 
 const RENDERERS = {

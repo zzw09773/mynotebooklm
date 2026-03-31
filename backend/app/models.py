@@ -93,6 +93,8 @@ def _run_migrations():
         sa_cols = {row[1] for row in cursor.fetchall()}
         if sa_cols and "progress_message" not in sa_cols:
             cursor.execute("ALTER TABLE studioartifact ADD COLUMN progress_message TEXT DEFAULT ''")
+        if sa_cols and "slide_count" not in sa_cols:
+            cursor.execute("ALTER TABLE studioartifact ADD COLUMN slide_count INTEGER DEFAULT 0")
 
         conn.commit()
     except sqlite3.OperationalError as e:
@@ -575,6 +577,7 @@ class StudioArtifact(SQLModel, table=True):
     content_text: str = ""      # plain-text output (for copy)
     error_message: str = ""
     progress_message: str = ""  # human-readable progress during generation
+    slide_count: int = 0        # number of slide thumbnails (slides artifact only)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -605,6 +608,7 @@ def update_studio_artifact(
     content_text: str | None = None,
     error_message: str | None = None,
     progress_message: str | None = None,
+    slide_count: int | None = None,
 ) -> StudioArtifact | None:
     with get_session() as session:
         artifact = session.get(StudioArtifact, artifact_id)
@@ -620,6 +624,8 @@ def update_studio_artifact(
             artifact.error_message = error_message
         if progress_message is not None:
             artifact.progress_message = progress_message
+        if slide_count is not None:
+            artifact.slide_count = slide_count
         artifact.updated_at = datetime.now(timezone.utc).isoformat()
         session.add(artifact)
         session.commit()

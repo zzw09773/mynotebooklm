@@ -44,7 +44,7 @@ def thumbnails_exist(artifact_id: int) -> bool:
 
 # ── Generation pipeline ───────────────────────────────────────
 
-def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
+def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> tuple[list[str], int]:
     """
     Blocking pipeline: PPTX → PDF → JPEG thumbnails.
 
@@ -52,7 +52,9 @@ def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
         artifact_id: Studio artifact ID (used for output directory naming).
         pptx_path:   Path to an already-generated .pptx file.
 
-    Returns list of thumbnail URL paths on success, empty list on failure.
+    Returns:
+        (thumbnail_url_list, page_count) tuple.
+        page_count is 0 on failure.
     """
     out_dir = _thumb_dir(artifact_id)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -78,12 +80,12 @@ def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
                 artifact_id, result.returncode,
                 result.stderr.decode(errors="replace"),
             )
-            return []
+            return [], 0
 
         pdf_path = tmp_path / "slides.pdf"
         if not pdf_path.exists():
             log.error("soffice produced no PDF for artifact %d", artifact_id)
-            return []
+            return [], 0
 
         # Step 2b: Strip malformed structure tree from LibreOffice-generated PDF.
         # LibreOffice exports tagged PDFs whose /StructTreeRoot is often incomplete,
@@ -122,6 +124,6 @@ def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
             log.info("Generated %d thumbnails for artifact %d", page_count, artifact_id)
         except Exception:
             log.exception("fitz rendering failed for artifact %d", artifact_id)
-            return []
+            return [], 0
 
-    return get_thumbnail_urls(artifact_id)
+    return get_thumbnail_urls(artifact_id), page_count

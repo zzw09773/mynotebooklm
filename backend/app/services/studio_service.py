@@ -385,6 +385,17 @@ async def _fix_slides_json(raw_json: str, validation_error: str) -> str:
     from app.routers.settings import _runtime_settings as _rs
     fix_prompt = (
         "以下 JSON 簡報資料有驗證錯誤，請修正並只輸出修正後的完整 JSON，不加任何說明或 markdown 標記。\n\n"
+        "欄位字元上限（請一次檢查所有欄位，不只修錯誤訊息中提到的那一個）：\n"
+        "- 所有版面 title：20字\n"
+        "- cover subtitle：30字\n"
+        "- section_divider description：40字\n"
+        "- process_flow step description：40字\n"
+        "- content_with_icon block description：40字\n"
+        "- big_number value：10字，unit/label：10/15字\n"
+        "- quote_slide quote：60字\n"
+        "- table header cell：20字，data cell：20字\n"
+        "- conclusion point text：25字\n"
+        "- dual_column points 每條：25字\n\n"
         f"錯誤訊息：\n{validation_error}\n\n"
         f"原始 JSON：\n{raw_json}"
     )

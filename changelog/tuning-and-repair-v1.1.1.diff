@@ -1,0 +1,199 @@
+diff --git a/backend/app/config.py b/backend/app/config.py
+index 9d451bb..63cf9f8 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -46,8 +46,8 @@ class Settings(BaseSettings):
+     max_upload_size_mb: int = 50
+ 
+     # ── RAG settings ─────────────────────────────────────────
+-    chunk_size: int = 512
+-    chunk_overlap: int = 64
++    chunk_size: int = 480  # nv-embed-v2 max is 512; leave buffer for sentence boundary
++    chunk_overlap: int = 48
+     top_k: int = 5
+     temperature: float = 0.1
+ 
+diff --git a/backend/app/schemas/slides.py b/backend/app/schemas/slides.py
+index 5785020..c0656ba 100644
+--- a/backend/app/schemas/slides.py
++++ b/backend/app/schemas/slides.py
+@@ -19,7 +19,7 @@ class SlideBase(BaseModel):
+ 
+ class CoverSlide(SlideBase):
+     layout: Literal["cover"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     subtitle: str | None = Field(default=None, max_length=30)
+ 
+ 
+@@ -30,7 +30,7 @@ class CoverSlide(SlideBase):
+ class SectionDividerSlide(SlideBase):
+     layout: Literal["section_divider"]
+     label: str | None = None
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     description: str | None = Field(default=None, max_length=40)
+ 
+ 
+@@ -46,7 +46,7 @@ class BigNumberItem(BaseModel):
+ 
+ class BigNumberSlide(SlideBase):
+     layout: Literal["big_number"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     items: list[BigNumberItem] = Field(min_length=1, max_length=3)
+ 
+ 
+@@ -56,13 +56,13 @@ class BigNumberSlide(SlideBase):
+ 
+ class CardItem(BaseModel):
+     icon: str | None = None
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     description: str | None = Field(default=None, max_length=40)
+ 
+ 
+ class CardGridSlide(SlideBase):
+     layout: Literal["card_grid"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     cards: list[CardItem] = Field(min_length=2, max_length=4)
+ 
+ 
+@@ -72,13 +72,13 @@ class CardGridSlide(SlideBase):
+ 
+ class DualColumnSide(BaseModel):
+     icon: str | None = None
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     points: list[Annotated[str, Field(max_length=25)]] = Field(min_length=1, max_length=5)
+ 
+ 
+ class DualColumnSlide(SlideBase):
+     layout: Literal["dual_column"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     left: DualColumnSide
+     right: DualColumnSide
+ 
+@@ -88,13 +88,13 @@ class DualColumnSlide(SlideBase):
+ # ---------------------------------------------------------------------------
+ 
+ class ProcessStep(BaseModel):
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     description: str | None = Field(default=None, max_length=40)
+ 
+ 
+ class ProcessFlowSlide(SlideBase):
+     layout: Literal["process_flow"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     steps: list[ProcessStep] = Field(min_length=3, max_length=5)
+ 
+ 
+@@ -103,13 +103,13 @@ class ProcessFlowSlide(SlideBase):
+ # ---------------------------------------------------------------------------
+ 
+ class ContentBlock(BaseModel):
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     description: str = Field(max_length=40)
+ 
+ 
+ class ContentWithIconSlide(SlideBase):
+     layout: Literal["content_with_icon"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     icon: str | None = None
+     blocks: list[ContentBlock] = Field(min_length=1, max_length=4)
+ 
+@@ -130,8 +130,8 @@ class QuoteSlide(SlideBase):
+ 
+ class TableSlide(SlideBase):
+     layout: Literal["table"]
+-    title: str = Field(max_length=15)
+-    headers: list[Annotated[str, Field(max_length=15)]] = Field(min_length=2, max_length=8)
++    title: str = Field(max_length=20)
++    headers: list[Annotated[str, Field(max_length=20)]] = Field(min_length=2, max_length=8)
+     rows: list[list[Annotated[str, Field(max_length=20)]]] = Field(min_length=1, max_length=12)
+ 
+     @model_validator(mode='after')
+@@ -151,7 +151,7 @@ class TableSlide(SlideBase):
+ 
+ class ChartSlide(SlideBase):
+     layout: Literal["chart"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     chart_type: Literal["BAR", "PIE"]
+     labels: list[str] = Field(min_length=2, max_length=8)
+     values: list[float] = Field(min_length=2, max_length=8)
+@@ -176,7 +176,7 @@ class ConclusionPoint(BaseModel):
+ 
+ class ConclusionSlide(SlideBase):
+     layout: Literal["conclusion"]
+-    title: str = Field(max_length=15)
++    title: str = Field(max_length=20)
+     summary: str | None = Field(default=None, max_length=40)
+     points: list[ConclusionPoint] = Field(min_length=1, max_length=5)
+ 
+diff --git a/backend/app/services/studio_service.py b/backend/app/services/studio_service.py
+index 423f12a..0323750 100644
+--- a/backend/app/services/studio_service.py
++++ b/backend/app/services/studio_service.py
+@@ -133,7 +133,7 @@ Icon 選用三規則：
+ 
+ | 欄位 | 上限 |
+ |------|------|
+-| 所有版面 title | 15字 |
++| 所有版面 title | 20字 |
+ | cover subtitle | 30字 |
+ | section_divider description | 40字 |
+ | process_flow step description | 40字 |
+@@ -141,7 +141,7 @@ Icon 選用三規則：
+ | big_number value | 10字 |
+ | big_number unit / label | 10 / 15字 |
+ | quote_slide quote | 60字 |
+-| table header cell | 15字 |
++| table header cell | 20字 |
+ | table data cell | 20字 |
+ | speaker_notes | 50–200字 |
+ 
+@@ -385,6 +385,17 @@ async def _fix_slides_json(raw_json: str, validation_error: str) -> str:
+     from app.routers.settings import _runtime_settings as _rs
+     fix_prompt = (
+         "以下 JSON 簡報資料有驗證錯誤，請修正並只輸出修正後的完整 JSON，不加任何說明或 markdown 標記。\n\n"
++        "欄位字元上限（請一次檢查所有欄位，不只修錯誤訊息中提到的那一個）：\n"
++        "- 所有版面 title：20字\n"
++        "- cover subtitle：30字\n"
++        "- section_divider description：40字\n"
++        "- process_flow step description：40字\n"
++        "- content_with_icon block description：40字\n"
++        "- big_number value：10字，unit/label：10/15字\n"
++        "- quote_slide quote：60字\n"
++        "- table header cell：20字，data cell：20字\n"
++        "- conclusion point text：25字\n"
++        "- dual_column points 每條：25字\n\n"
+         f"錯誤訊息：\n{validation_error}\n\n"
+         f"原始 JSON：\n{raw_json}"
+     )
+diff --git "a/data/uploads/175d9ce9_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" "b/data/uploads/175d9ce9_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf"
+deleted file mode 100644
+index 8b18baa..0000000
+Binary files "a/data/uploads/175d9ce9_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" and /dev/null differ
+diff --git "a/data/uploads/215ecace_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" "b/data/uploads/215ecace_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf"
+deleted file mode 100644
+index 8b18baa..0000000
+Binary files "a/data/uploads/215ecace_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" and /dev/null differ
+diff --git "a/data/uploads/7ca78ce5_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" "b/data/uploads/7ca78ce5_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf"
+deleted file mode 100644
+index 8b18baa..0000000
+Binary files "a/data/uploads/7ca78ce5_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" and /dev/null differ
+diff --git "a/data/uploads/92c86f46_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" "b/data/uploads/92c86f46_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf"
+deleted file mode 100644
+index 8b18baa..0000000
+Binary files "a/data/uploads/92c86f46_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" and /dev/null differ
+diff --git "a/data/uploads/a2261840_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" "b/data/uploads/a2261840_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf"
+deleted file mode 100644
+index 8b18baa..0000000
+Binary files "a/data/uploads/a2261840_2 \346\234\210\344\273\275\346\226\260\344\272\272\345\277\203\345\276\227\345\240\261\345\221\212.pdf" and /dev/null differ

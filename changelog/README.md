@@ -25,7 +25,28 @@ changelog/
 
 ## 📝 版本記錄
 
-### v1.1.0 - ComfyUI Flux 插圖 + 幻燈片管線全面重構 ⭐ 最新版本
+### v1.1.1 - 參數微調與自修復提示強化 ⭐ 最新版本
+**日期：** 2026-03-31  
+**分支：** `main`  
+**Commits：** `88dce08`, `3d84e33`
+
+**主要改動：**
+- 🔧 RAG chunk_size 512→480（nv-embed-v2 留 buffer）
+- 📏 所有 slide title max_length 15→20 字
+- 🛠️ 自修復 prompt 加入完整欄位字元上限表
+- 🗑️ 清理 5 個重複 PDF 上傳檔
+
+**統計：**
+- 3 個程式碼檔案變更
+- +30 行新增 / -19 行刪除
+
+**檔案：**
+- 📄 詳細說明：`CHANGELOG_v1.1.1_tuning-and-repair.md`
+- 🔀 Diff：`tuning-and-repair-v1.1.1.diff`
+
+---
+
+### v1.1.0 - ComfyUI Flux 插圖 + 幻燈片管線全面重構
 **日期：** 2026-03-30 ~ 2026-03-31  
 **分支：** `v1.1.0`  
 **Commits：** `2ebde13`, `f6c7e3f`

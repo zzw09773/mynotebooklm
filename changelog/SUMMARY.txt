@@ -7,18 +7,19 @@
 │          NotebookLM 版本歷史和改動摘要                      │
 └─────────────────────────────────────────────────────────────┘
 
-v1.1.0 (2026-03-30) - ComfyUI Flux 幻燈片插圖自動生成 ⭐ 最新版本
+v1.1.0 (2026-03-30~31) - ComfyUI 插圖 + 管線重構 ⭐ 最新版本
 ├─ 分支：v1.1.0
-├─ Commit：2ebde13
-├─ 檔案數：7
-├─ 新增行：504
-├─ 刪除行：0
+├─ Commits：2ebde13, f6c7e3f
+├─ 檔案數：18
+├─ 新增行：1,182
+├─ 刪除行：647
+├─ 淨變化：+535
 └─ 主要內容：
    ✓ ComfyUI Flux.1-dev 文生圖整合
-   ✓ 幻燈片自動插圖（3 種版面）
-   ✓ LLM 生成英文圖像提示詞
-   ✓ 非強制設計（停用不影響生成）
-   ✓ Docker host.docker.internal 映射
+   ✓ Pydantic schema 強化 + model_validator
+   ✓ 結構化 Vision QA + 並行 + 自動修復
+   ✓ 刪除舊 pptx_runner.js，統一渲染
+   ✓ slide_count 消除前端探測
 
 v0.2.0 (2026-03-26) - Pydantic 模型和幻燈片渲染 (tag: v1.0.0-beta)
 ├─ 分支：v0.2.0

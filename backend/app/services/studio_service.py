@@ -20,6 +20,8 @@ from app.models import (
     update_studio_artifact,
     STUDIO_ARTIFACT_TYPES,
 )
+from pydantic import ValidationError
+from app.schemas.slides import SlidesSpec
 
 # ── System prompts ────────────────────────────────────────────
 
@@ -37,6 +39,44 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
 3. 對話自然生動，像真實的討論節目。
 4. 涵蓋文件的主要重點與有趣細節。
 5. 輸出必須是合法的 JSON。
+"""
+
+_SLIDES_OUTLINE_PROMPT = """\
+你是簡報架構師。根據以下文件內容，先規劃一份簡報大綱，再由另一個步驟填充完整內容。
+
+請分析文件主題，輸出 JSON 格式的大綱：
+{
+  "narrative": "匯報|提案|分析|教學",
+  "theme": "tech|ocean|golden|frost|garden|sports",
+  "chapters": [
+    {
+      "chapter_title": "章節標題",
+      "key_point": "這章節要傳達的核心論點（一句話）",
+      "suggested_layout": "建議版面類型（如 big_number、card_grid 等）",
+      "data_available": true或false（文件中是否有具體數字/統計）
+    }
+  ]
+}
+
+選擇敘事弧線的依據：
+- 匯報：文件描述現況、成效、數據 → 背景→發現→數據→啟示→結論
+- 提案：文件提出解決方案 → 痛點→方案→佐證→行動
+- 分析：文件分析法規、政策、概念 → 定義→拆解→利弊→建議
+- 教學：文件解釋知識、技術、流程 → 重要性→概念→步驟→回顧
+
+選擇主題色票的依據：
+- tech：科技、AI、軟體、數位轉型
+- ocean：環境、醫療、教育、公共政策、法律
+- golden：金融、商業、行銷、品牌
+- frost：學術、研究、法律白皮書（嚴謹正式）
+- garden：農業、食品、永續、ESG
+- sports：體育、賽事、健康、活力
+
+規則：
+- chapters 數量 12-15 個（對應 12-15 頁內容，不含封面和結尾）
+- 嚴格按照敘事弧線的邏輯順序排列 chapters
+- suggested_layout 從以下選擇：big_number、card_grid、dual_column、process_flow、content_with_icon、quote_slide、table、chart、section_divider
+- 只輸出 JSON，不加說明文字
 """
 
 SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON 格式的簡報結構。
@@ -58,21 +98,56 @@ SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON �
 - card_grid: 並列卡片（title, cards:[{icon,title,description}], 2-4張）
 - dual_column: 比較（title, left/right:{icon,title,points:[]}）
 - process_flow: 流程步驟（title, steps:[{title,description}], 2-5步）
-- content_with_icon: 圖文（title, icon, blocks:[{title,description}], 1-4個）
+- content_with_icon: 圖文（title, icon, blocks:[{title,description}], 1-4個）⚠️ blocks 為必填，不可省略
 - quote_slide: 金句（quote, source）
-- table: 表格（title, headers:[], rows:[[]]）
-- chart: 圖表（title, chart_type:BAR|PIE, labels:[], values:[]）⚠️ 僅當文件含具體數字時使用
+- table: 表格（title, headers:[], rows:[[]]）⚠️ rows 中每個子陣列長度必須等於 headers 長度，否則驗證失敗
+- chart: 圖表（title, chart_type:BAR|PIE, labels:[], values:[]）⚠️ labels 與 values 長度必須相同；僅當文件含具體數字時使用
 - conclusion: 結尾（title, summary, points:[{text,icon}]）
 
-可用 icon：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog
+可用 icon 及語義對照（先判斷概念語義，再對應 icon）：
+成長/趨勢/成果 → FaChartLine | 保護/防禦/安全 → FaShieldAlt
+創意/策略/靈感 → FaLightbulb | 法律/規範/裁定 → FaGavel
+資料/儲存/結構 → FaDatabase  | 全球/國際/網路 → FaGlobe
+人群/團隊/組織 → FaUsers     | 驗證/完成/通過 → FaCheck
+隱私/權限/加密 → FaLock      | 學習/知識/文獻 → FaBook
+搜尋/分析/調查 → FaSearch    | 目標/里程碑/旗幟 → FaFlag
+發射/行動/創新 → FaRocket    | 合作/協議/握手 → FaHandshake
+系統/設定/機制 → FaCog        | 報表/統計/數據 → FaChartBar
+
+Icon 選用三規則：
+1. 先將概念抽象成語義類別，再從對照表選最接近的 icon
+2. 同一頁多個 icon 必須在形狀上明顯不同，讓讀者掃一眼即可分辨各塊的差異
+3. 每個 icon 在整份簡報最多出現 2 次
 
 ## 內容規則
 - 首頁 cover，末頁 conclusion
 - 相鄰兩頁不可相同 layout，全簡報 ≥5 種不同 layout
+- 同一 layout 類型在全簡報最多出現 2 次；每個 layout 類型出現後，至少間隔 3 頁才可再次使用
 - 繁體中文，不編造數據或引言
 - 標題≤15字，要點≤25字
 - 有明確數字優先用 big_number；chart 僅用於文件有具體數字時
 - 敘事弧線：匯報(背景→發現→數據→啟示→結論) | 提案(痛點→方案→佐證→行動) | 分析(定義→拆解→利弊→建議) | 教學(重要性→概念→步驟→回顧)
+
+## 文字密度規則（超出上限驗證會失敗）
+投影片只放關鍵字短語；完整解釋、背景脈絡放 speaker_notes。
+
+| 欄位 | 上限 |
+|------|------|
+| 所有版面 title | 15字 |
+| cover subtitle | 30字 |
+| section_divider description | 40字 |
+| process_flow step description | 40字 |
+| content_with_icon block description | 40字 |
+| big_number value | 10字 |
+| big_number unit / label | 10 / 15字 |
+| quote_slide quote | 60字 |
+| table header cell | 15字 |
+| table data cell | 20字 |
+| speaker_notes | 50–200字 |
+
+description 欄位一律使用純繁體中文短語，禁止夾雜英文術語（如 stakeholder、organisational）；英文專有名詞移到 speaker_notes。
+
+⚠️ description 欄位必須補充 title 以外的資訊，不得重複或意譯 title 內容。錯誤示範：title="坦承接受懲罰" description="坦承並接受懲罰" — 完全重複，不可接受。
 
 ## 輸出範例（4頁示意，實際需封面＋12-15頁內容＋結尾，共 14-17 頁）
 ```json
@@ -80,18 +155,20 @@ SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON �
   "theme": "tech",
   "narrative": "匯報",
   "slides": [
-    {"layout": "cover", "title": "AI 導入成效報告", "subtitle": "2026 Q1 季度回顧"},
+    {"layout": "cover", "title": "AI 導入成效報告", "subtitle": "2026 Q1 季度回顧",
+     "speaker_notes": "本報告摘要 2026 第一季 AI 系統導入後的主要成效，涵蓋模型準確率、處理速度提升與下一步擴展計畫。"},
     {"layout": "big_number", "title": "關鍵指標", "items": [
       {"value": "98%", "unit": "準確率", "label": "模型推論"},
       {"value": "3.2x", "unit": "加速", "label": "處理速度"}
-    ]},
+    ], "speaker_notes": "兩項核心指標均超越原訂目標。98% 準確率是在正式環境連續兩周測試後取得的穩定值；3.2 倍加速效果已通過壓力測試驗證。"},
     {"layout": "card_grid", "title": "三大策略方向", "cards": [
       {"icon": "FaRocket", "title": "擴展部署", "description": "推廣至五個部門"},
       {"icon": "FaDatabase", "title": "資料整合", "description": "統一資料湖架構"},
       {"icon": "FaUsers", "title": "人才培訓", "description": "培訓兩百名工程師"}
-    ]},
+    ], "speaker_notes": "三項策略並行推進：部署擴展聚焦高流量業務部門；資料整合解決現有資料孤島問題；人才培訓確保技術落地後有足夠人力維運。"},
     {"layout": "conclusion", "title": "總結與展望", "summary": "AI 導入已見初步成效",
-     "points": [{"text": "模型準確率達 98%"}, {"text": "處理速度提升 3.2 倍"}, {"text": "下季度擴展至全公司", "icon": "FaRocket"}]}
+     "points": [{"text": "模型準確率達 98%"}, {"text": "處理速度提升 3.2 倍"}, {"text": "下季擴展至全公司", "icon": "FaRocket"}],
+     "speaker_notes": "本季成效驗證了 AI 導入策略的可行性。下一季將全面推廣，預期帶來更大規模的效率提升。歡迎提問。"}
   ]
 }
 ```
@@ -100,6 +177,7 @@ SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON �
 - 只輸出 JSON，不加 ```json 標記或任何說明文字
 - slides 陣列必須包含 14-17 頁（1 封面 ＋ 12-15 內容頁 ＋ 1 結尾）
 - 充分利用文件素材，每個主題/章節至少一頁，不要將多個主題壓縮在一頁
+- 每頁必須包含 speaker_notes（50–200字的繁體中文完整句子，供演講者現場參考）
 - 輸出必須是合法的 JSON
 """
 
@@ -318,11 +396,15 @@ async def _fix_slides_json(raw_json: str, validation_error: str) -> str:
     )
     try:
         parts: list[str] = []
-        async for chunk in await llm.astream_chat(messages):
-            if chunk.delta:
-                parts.append(chunk.delta)
+        async with asyncio.timeout(90):
+            async for chunk in await llm.astream_chat(messages):
+                if chunk.delta:
+                    parts.append(chunk.delta)
         fixed = "".join(parts).strip()
         return _sanitize_json(fixed) if fixed else raw_json
+    except asyncio.TimeoutError:
+        logging.warning("_fix_slides_json timed out after 90s — using original JSON")
+        return raw_json
     except Exception:
         logging.exception("_fix_slides_json LLM call failed — using original JSON")
         return raw_json
@@ -354,6 +436,38 @@ def _format_text(artifact_type: str, data: dict) -> str:
 
 
 # ── Core generation function ──────────────────────────────────
+
+async def _generate_slides_outline(
+    combined_text: str,
+    client,
+) -> dict | None:
+    """
+    Stage 1 of two-stage slides generation: produce a narrative outline.
+    Returns a dict with keys: narrative, theme, chapters — or None on failure.
+    """
+    from app.services.llm_service import get_llm
+    llm = get_llm(async_client=client)
+    user_msg = f"請分析以下文件內容並規劃簡報大綱：\n\n{combined_text}"
+    messages = [
+        ChatMessage(role=MessageRole.SYSTEM, content=_SLIDES_OUTLINE_PROMPT),
+        ChatMessage(role=MessageRole.USER, content=user_msg),
+    ]
+    try:
+        parts: list[str] = []
+        async with asyncio.timeout(120):
+            async for chunk in await llm.astream_chat(messages):
+                if chunk.delta:
+                    parts.append(chunk.delta)
+        raw = "".join(parts).strip()
+        raw = _strip_code_fence(raw)
+        outline = json.loads(raw)
+        if isinstance(outline, dict) and "chapters" in outline:
+            return outline
+        return None
+    except Exception:
+        logging.warning("Slides outline generation failed — proceeding without outline")
+        return None
+
 
 async def generate_artifact(project_id: int, artifact_id: int, artifact_type: str) -> None:
     """
@@ -391,6 +505,7 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
 
         # Slides use a tighter text budget to keep the total LLM context smaller,
         # which reduces model reasoning time (TTFT) significantly.
+        outline = None
         if artifact_type == "slides":
             parts_slides: list[str] = []
             for doc in docs:
@@ -407,12 +522,26 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
                 combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
 
         prompt = ARTIFACT_PROMPTS[artifact_type]
-        user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
 
         # Use a fresh AsyncClient per generation to avoid stale connection
         # pool state after asyncio cancellation (previous timeout can corrupt
         # the shared pool, causing the next streaming request to receive 0 bytes).
         _stream_client = _fresh_async_client()
+
+        if artifact_type == "slides":
+            # Two-stage generation: first generate an outline to anchor the narrative structure
+            update_studio_artifact(artifact_id, progress_message="AI 正在分析文件架構，規劃敘事大綱…")
+            outline = await _generate_slides_outline(combined, _stream_client)
+
+        if artifact_type == "slides" and outline:
+            outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
+            user_msg = (
+                f"【敘事大綱（請嚴格按照此架構生成簡報）】\n{outline_json}\n\n"
+                f"【文件內容】\n{combined}"
+            )
+        else:
+            user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
+
         # Slides may use a dedicated larger model (slides_model) to improve
         # generation quality and reduce TTFT on complex prompts.
         from app.routers.settings import _runtime_settings as _rs
@@ -496,9 +625,6 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
         if artifact_type == "slides":
             # LLM returns structured JSON (SlidesSpec), not PptxGenJS code.
             # Validate via Pydantic, fix once if needed, then hand off to renderer.
-            from pydantic import ValidationError
-            from app.schemas.slides import SlidesSpec
-
             sanitized = _sanitize_json(raw)
             spec: SlidesSpec | None = None
             try:
@@ -530,7 +656,17 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
                 content_text="",
                 progress_message="AI 產出完成，正在建立簡報…",
             )
-            asyncio.create_task(_generate_slides_from_json(artifact_id, spec_json))
+            _task = asyncio.create_task(_generate_slides_from_json(artifact_id, spec_json))
+
+            def _log_task_exception(fut: asyncio.Future) -> None:
+                if fut.exception():
+                    logging.error(
+                        "Background slides task failed for artifact=%d: %s",
+                        artifact_id,
+                        fut.exception(),
+                    )
+
+            _task.add_done_callback(_log_task_exception)
             return
 
         data = json.loads(raw)
@@ -615,7 +751,6 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> 
         from app.services import comfyui_service
         if _rs_slides.comfyui_api_url and await comfyui_service.is_available():
             try:
-                from app.schemas.slides import SlidesSpec
                 spec = SlidesSpec.model_validate_json(spec_json)
                 await _add_illustrations_to_pptx(artifact_id, pptx_path, spec)
             except Exception:
@@ -623,7 +758,7 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> 
 
         update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
         try:
-            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+            _, slide_count = await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
         except Exception:
             logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
             update_studio_artifact(
@@ -633,9 +768,14 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> 
             )
             return
 
-        # Optional Vision QA
+        if slide_count > 0:
+            update_studio_artifact(artifact_id, slide_count=slide_count)
+
+        # Optional Vision QA — only runs when vision_model is configured.
+        # When issues are found we attempt one automated re-render with an
+        # LLM-assisted fix prompt before giving up and marking as done.
         from app.routers.settings import _runtime_settings
-        from app.services.vision_qa import visual_qa_check
+        from app.services.vision_qa import visual_qa_check, classify_issues, IssueType
         from app.services.thumbnail_service import get_thumbnail_urls
 
         if _runtime_settings.vision_model:
@@ -654,6 +794,56 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> 
                     "Vision QA found %d issue(s) in artifact %d: %s",
                     problem_count, artifact_id, issues,
                 )
+                # ── Feedback loop: attempt one automated fix ──────────────
+                issue_types = classify_issues(issues)
+                fixed_spec_json = await _apply_qa_fixes(spec_json, issues, issue_types)
+                if fixed_spec_json:
+                    logging.info(
+                        "Vision QA: retrying artifact=%d with auto-fixed spec (issues: %s)",
+                        artifact_id, [t.value for t in issue_types],
+                    )
+                    update_studio_artifact(
+                        artifact_id,
+                        progress_message="偵測到視覺問題，正在自動修正並重新渲染…",
+                    )
+                    # Light retry: re-render PPTX, re-embed ComfyUI illustrations, re-generate thumbnails
+                    try:
+                        retry_pptx = str(Path(tmp) / "slides_retry.pptx")
+                        result2, stderr2 = await execute_slides_json(fixed_spec_json, retry_pptx)
+                        if result2 == RunResult.SUCCESS:
+                            shutil.copy2(retry_pptx, pptx_path)
+                            # Re-embed existing ComfyUI illustrations (already generated, just need re-embed)
+                            if _rs_slides.comfyui_api_url:
+                                try:
+                                    from app.schemas.slides import SlidesSpec as _RetrySpec
+                                    retry_spec = _RetrySpec.model_validate_json(fixed_spec_json)
+                                    await asyncio.to_thread(
+                                        _embed_images_in_pptx,
+                                        pptx_path,
+                                        [
+                                            (idx, s)
+                                            for idx, s in enumerate(retry_spec.slides)
+                                            if getattr(s, "layout", "") in _ILLUSTRATABLE_LAYOUTS
+                                        ][:_MAX_ILLUSTRATIONS],
+                                        [
+                                            (_COMFYUI_IMG_ROOT / str(artifact_id) / f"slide_{idx:03d}.png")
+                                            if (_COMFYUI_IMG_ROOT / str(artifact_id) / f"slide_{idx:03d}.png").exists()
+                                            else None
+                                            for idx, s in enumerate(retry_spec.slides)
+                                            if getattr(s, "layout", "") in _ILLUSTRATABLE_LAYOUTS
+                                        ][:_MAX_ILLUSTRATIONS],
+                                    )
+                                    logging.info("Re-embedded ComfyUI illustrations after QA retry for artifact=%d", artifact_id)
+                                except Exception:
+                                    logging.exception("Failed to re-embed illustrations after QA retry for artifact=%d", artifact_id)
+                            _, sc = await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+                            if sc > 0:
+                                update_studio_artifact(artifact_id, slide_count=sc)
+                            logging.info("Vision QA retry render succeeded for artifact=%d", artifact_id)
+                        else:
+                            logging.warning("Vision QA retry render failed for artifact=%d: %s", artifact_id, stderr2)
+                    except Exception:
+                        logging.exception("Vision QA retry failed for artifact=%d — accepting original", artifact_id)
 
         elapsed = time.monotonic() - t0
         logging.info(
@@ -663,34 +853,115 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) -> 
         update_studio_artifact(artifact_id, status="done", progress_message="")
 
 
-# ── ComfyUI slide illustration helpers ────────────────────────────────────────
+# ── Vision QA auto-fix helpers ────────────────────────────────────────────────
 
-_SLIDE_ILLUSTRATION_PROMPT = """\
-You are an expert at creating image prompts for business presentation slides.
-Write ONE English image generation prompt for Flux AI based on the slide details below.
+_QA_FIX_PROMPT = """\
+你是簡報文字修正助手。以下投影片有視覺品質問題，請修正**僅有問題的投影片**。
 
-CRITICAL RULES:
-- Output must be 100% English — Flux does not support Chinese
-- Visually represent the SPECIFIC topic using relevant objects/icons, NOT generic nature or landscapes
-- Topic-to-visual mapping examples:
-    AI / machine learning  → neural network, circuit nodes, data streams, robot icon
-    compliance / legal     → shield, document, checkmark, balance scale, seal, lock
-    risk / security        → shield, lock, firewall, warning icon, protected layers
-    data / metrics         → bar chart, dashboard, data nodes, graph, analytics
-    process / workflow     → flowchart arrows, gear, pipeline, connected steps
-    finance / investment   → coins, chart arrow, growth bar, currency symbol
+## 問題清單
+{issue_summary}
 
-Style instructions:
-- Flat vector illustration, clean minimal, corporate color palette
-- Light or white background; avoid dark moody scenes
-- No human faces; no text or letters in the image
-- Landscape 4:3 format suitable as a slide visual
+## 修正規則
+- low_contrast: 不修改文字（此問題由主題色碼處理）
+- text_overflow: 將該頁所有文字欄位縮短 30%，保持語意完整
+- excessive_blank: 在該頁增加 1-2 個 cards/items/points，用文件相關內容填充
+- overlap: 減少該頁的 cards 或 steps 數量至 3 個以內
 
-Slide layout : {layout}
-Slide title  : {title}
-Slide content: {content_hint}
+## 要求
+- 只輸出修正後的完整 JSON（整份 slides spec）
+- 保留未出問題投影片的原樣
+- 輸出合法 JSON，不加 ```json 或說明文字
+- 繁體中文
 
-Output ONLY the prompt (20-45 words), nothing else:"""
+原始 JSON：
+{spec_json}"""
+
+
+async def _apply_qa_fixes(
+    spec_json: str,
+    issues: list[dict],
+    issue_types: "set",
+) -> str | None:
+    """
+    Ask LLM to fix only the problematic slides based on VLM feedback.
+    Has a 60-second timeout to prevent infinite hangs.
+    Returns fixed JSON string, or None if the fix attempt fails.
+    """
+    from app.services.vision_qa import IssueType
+
+    # If only low_contrast issues, fix theme locally without LLM
+    if issue_types == {IssueType.LOW_CONTRAST}:
+        try:
+            spec_dict = json.loads(spec_json)
+            if spec_dict.get("theme") == "frost":
+                spec_dict["theme"] = "ocean"
+                logging.info("QA auto-fix: switched theme frost → ocean (low_contrast)")
+            fixed = SlidesSpec.model_validate(spec_dict)
+            return fixed.model_dump_json()
+        except Exception:
+            logging.exception("QA local theme fix failed")
+            return None
+
+    # Summarise issues for the prompt
+    issue_lines: list[str] = []
+    for slide_issue in issues:
+        slide_num = slide_issue.get("slide", "?")
+        for iss in slide_issue.get("issues", []):
+            iss_type = iss.get("type", "unknown")
+            iss_desc = iss.get("description", "")
+            issue_lines.append(f"  - 第{slide_num}頁 [{iss_type}]: {iss_desc}")
+    issue_summary = "\n".join(issue_lines) or "  (unspecified issues)"
+
+    fix_prompt = _QA_FIX_PROMPT.format(issue_summary=issue_summary, spec_json=spec_json)
+    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
+    fix_client = _fresh_async_client()
+    llm = get_llm(async_client=fix_client)
+    try:
+        async def _stream_fix():
+            parts: list[str] = []
+            async for chunk in await llm.astream_chat(messages):
+                if chunk.delta:
+                    parts.append(chunk.delta)
+            return "".join(parts).strip()
+
+        # 60-second hard timeout
+        raw = await asyncio.wait_for(_stream_fix(), timeout=60)
+        fixed = _strip_code_fence(raw)
+
+        # Validate the fixed JSON is still a valid SlidesSpec
+        SlidesSpec.model_validate_json(fixed)
+        return fixed
+    except asyncio.TimeoutError:
+        logging.warning("QA fix LLM call timed out after 60s — skipping retry")
+        return None
+    except Exception:
+        logging.exception("QA fix LLM call failed for spec — skipping retry")
+        return None
+    finally:
+        await fix_client.aclose()
+
+
+
+
+# Maps SlidesSpec.theme → color palette description for ComfyUI Flux prompts
+_THEME_COLOR_HINTS: dict[str, str] = {
+    "tech":   "dark navy background with electric blue neon glow, cyan circuit patterns, futuristic digital aesthetic",
+    "ocean":  "deep teal gradient with seafoam highlights, flowing water patterns, aquatic marine motifs",
+    "golden": "rich dark brown background with warm amber and gold metallic accents, premium luxury feel",
+    "frost":  "steel blue geometric shapes on soft gray background, ice crystal patterns, silver metallic accents, NOT white background",
+    "garden": "warm ivory background with sage green botanical illustrations, earth tone organic shapes",
+    "sports": "bold crimson red streaks on deep navy, dynamic motion lines, high-energy athletic aesthetic",
+}
+
+# Maps SlidesSpec.theme → illustration visual style
+_THEME_STYLE_HINTS: dict[str, str] = {
+    "tech":   "futuristic 3D render with glowing edges and depth",
+    "ocean":  "soft watercolor illustration with flowing organic forms",
+    "golden": "elegant art deco style with metallic textures and geometry",
+    "frost":  "clean geometric illustration with crystalline angular details",
+    "garden": "warm botanical watercolor with hand-drawn organic feel",
+    "sports": "dynamic motion graphics with bold graphic design and energy",
+}
 
 # Layouts worth illustrating.
 # Only layouts that have a natural empty zone for an image:
@@ -710,57 +981,102 @@ _MAX_ILLUSTRATIONS = 5
 _COMFYUI_IMG_ROOT = Path("/data/comfyui_images")
 
 
+_SLIDE_ILLUSTRATION_BATCH_PROMPT = """\
+You are an expert at creating image prompts for business presentation slides.
+Generate English image prompts for Flux AI for each slide listed below.
+
+CRITICAL RULES:
+- All prompts must be 100% English — Flux does not support Chinese
+- Each prompt must visually represent its SPECIFIC topic using concrete objects — NOT generic nature or plain backgrounds
+- Topic-to-visual mapping (use as inspiration):
+    AI / machine learning  → neural network nodes, circuit board traces, data stream particles
+    compliance / legal     → official seal, balance scale, document stack, gavel, protective shield
+    risk / security        → layered firewall, lock mechanism, warning indicator, armored vault
+    data / analytics       → 3D bar chart, holographic dashboard, flowing data nodes, graph lines
+    process / workflow     → connected gear system, flowchart pipeline, interlocking steps
+    finance / investment   → ascending chart bars, coin stack, growth curve, currency symbols
+    military / defense     → insignia badge, strategic map, command center, structured ranks
+    education / research   → open book, magnifying glass, academic structure, knowledge graph
+    health / medicine      → cross symbol, cellular structure, diagnostic display, clean lab
+    environment / energy   → leaf circuit, solar array, wind turbine, green gradient sphere
+- Interpret ANY topic not listed above by identifying its core visual metaphors
+
+Visual style for ALL prompts: {style_hint}
+Color palette for ALL prompts: {color_hint}
+Constraints: No human faces; no text or letters in the image; landscape 4:3 format
+
+SLIDES:
+{slides_list}
+
+Return a JSON array of strings — one prompt per slide (30-60 words each), in the same order:
+["prompt for slide 1", "prompt for slide 2", ...]
+Return ONLY the JSON array, nothing else."""
+
+
 async def _generate_image_prompts_for_slides(
     eligible: list[tuple[int, object]],
+    theme: str = "tech",
 ) -> list[str | None]:
     """
-    Use LLM to generate English image generation prompts for each eligible slide.
+    Use ONE LLM call to generate English image prompts for all eligible slides.
     Returns a list of prompt strings (or None if generation fails per slide).
     """
-    from app.routers.settings import _runtime_settings as _rs
+    if not eligible:
+        return []
 
-    prompts: list[str | None] = []
+    color_hint = _THEME_COLOR_HINTS.get(theme, _THEME_COLOR_HINTS["tech"])
+    style_hint = _THEME_STYLE_HINTS.get(theme, _THEME_STYLE_HINTS["tech"])
+
+    # Build the slides list section
+    slide_lines: list[str] = []
+    for i, (_slide_idx, slide_data) in enumerate(eligible):
+        title = getattr(slide_data, "title", "") or getattr(slide_data, "quote", "") or ""
+        layout = getattr(slide_data, "layout", "")
+        hint_parts: list[str] = []
+        subtitle = getattr(slide_data, "subtitle", "") or getattr(slide_data, "description", "")
+        if subtitle:
+            hint_parts.append(subtitle)
+        cards: list = getattr(slide_data, "cards", []) or []
+        if cards:
+            hint_parts.extend(getattr(c, "title", "") for c in cards[:3])
+        content_hint = "; ".join(p for p in hint_parts if p) or "(none)"
+        slide_lines.append(f"Slide {i + 1}: layout={layout}, title={title}, content={content_hint}")
+
+    slides_list = "\n".join(slide_lines)
+    user_msg = _SLIDE_ILLUSTRATION_BATCH_PROMPT.format(
+        style_hint=style_hint,
+        color_hint=color_hint,
+        slides_list=slides_list,
+    )
+
     client = _fresh_async_client()
     llm = get_llm(async_client=client)
-
     try:
-        for _slide_idx, slide_data in eligible:
-            title = getattr(slide_data, "title", "") or getattr(slide_data, "quote", "") or ""
-            layout = getattr(slide_data, "layout", "")
+        parts: list[str] = []
+        async for chunk in await llm.astream_chat(
+            [ChatMessage(role=MessageRole.USER, content=user_msg)]
+        ):
+            if chunk.delta:
+                parts.append(chunk.delta)
+        raw = "".join(parts).strip()
+        raw = _strip_code_fence(raw)
 
-            # Build a content hint from available slide fields so the LLM
-            # can generate a topically relevant prompt instead of guessing.
-            hint_parts: list[str] = []
-            subtitle = getattr(slide_data, "subtitle", "") or getattr(slide_data, "description", "")
-            if subtitle:
-                hint_parts.append(subtitle)
-            bullets: list = getattr(slide_data, "bullets", []) or []
-            if bullets:
-                hint_parts.extend(str(b) for b in bullets[:3])  # first 3 bullets
-            # For card_grid / dual_column layouts, grab card titles
-            cards: list = getattr(slide_data, "cards", []) or []
-            if cards:
-                hint_parts.extend(getattr(c, "title", "") for c in cards[:3])
-            content_hint = "; ".join(p for p in hint_parts if p) or "(none)"
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            # Pad or truncate to match eligible count
+            result: list[str | None] = []
+            for i in range(len(eligible)):
+                val = parsed[i] if i < len(parsed) else None
+                result.append(str(val).strip() if val else None)
+            return result
+        raise ValueError(f"Expected JSON array, got: {type(parsed)}")
 
-            user_msg = _SLIDE_ILLUSTRATION_PROMPT.format(
-                layout=layout, title=title, content_hint=content_hint
-            )
-            messages = [ChatMessage(role=MessageRole.USER, content=user_msg)]
-            try:
-                parts: list[str] = []
-                async for chunk in await llm.astream_chat(messages):
-                    if chunk.delta:
-                        parts.append(chunk.delta)
-                img_prompt = "".join(parts).strip()
-                prompts.append(img_prompt if img_prompt else None)
-            except Exception:
-                logging.exception("Image prompt LLM call failed for slide_idx=%d", _slide_idx)
-                prompts.append(None)
+    except Exception:
+        logging.exception("Batch image prompt generation failed — no illustrations")
+        return [None] * len(eligible)
     finally:
         await client.aclose()
 
-    return prompts
 
 
 def _embed_images_in_pptx(
@@ -839,8 +1155,9 @@ async def _add_illustrations_to_pptx(
     logging.info("Generating ComfyUI illustrations for %d slides (artifact=%d)", len(eligible), artifact_id)
     update_studio_artifact(artifact_id, progress_message=f"正在生成投影片插圖 (0/{len(eligible)})…")
 
-    # Step 1: Generate English prompts via LLM
-    img_prompts = await _generate_image_prompts_for_slides(eligible)
+    # Step 1: Generate English prompts via LLM (pass theme for color palette guidance)
+    theme = getattr(spec, "theme", "tech") or "tech"
+    img_prompts = await _generate_image_prompts_for_slides(eligible, theme=theme)
 
     # Step 2: Generate images via ComfyUI (max 2 concurrent)
     img_dir = _COMFYUI_IMG_ROOT / str(artifact_id)
@@ -877,114 +1194,3 @@ async def _add_illustrations_to_pptx(
         "ComfyUI illustrations: %d/%d embedded for artifact=%d",
         success_count, len(eligible), artifact_id,
     )
-
-
-async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:
-    """
-    Ask the LLM to fix an error in PptxGenJS code.
-    Returns the corrected code, or the original code if the fix attempt fails.
-    """
-    fix_prompt = (
-        "以下 PptxGenJS 程式碼執行時發生錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
-        "不加任何說明或 markdown 標記。\n\n"
-        "重要提醒：每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg}) 才能使用 sld。\n\n"
-        f"錯誤訊息：{error_msg}\n\n"
-        f"程式碼：\n{code}"
-    )
-    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
-    fix_client = _fresh_async_client()
-    llm = get_llm(async_client=fix_client)
-    try:
-        parts: list[str] = []
-        async for chunk in await llm.astream_chat(messages):
-            if chunk.delta:
-                parts.append(chunk.delta)
-        fixed = "".join(parts).strip()
-        fixed = _strip_code_fence(fixed)
-        return fixed if fixed else code
-    except Exception:
-        logging.exception("Code fix LLM call failed for artifact — using original code")
-        return code
-    finally:
-        await fix_client.aclose()
-
-
-async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
-    """
-    Background task for slides:
-      1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
-         On SyntaxError or RuntimeError: ask LLM to fix and retry once.
-      2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
-      3. Convert .pptx → JPEG thumbnails (soffice → fitz)
-    """
-    from app.services.pptx_runner_service import execute_pptxgenjs, RunResult
-    from app.services.thumbnail_service import generate_thumbnails
-
-    with tempfile.TemporaryDirectory() as tmp:
-        pptx_tmp = str(Path(tmp) / "slides.pptx")
-        update_studio_artifact(artifact_id, progress_message="正在執行 PptxGenJS 生成簡報…")
-
-        result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
-
-        # On syntax or runtime error: ask LLM to fix then retry once
-        if result in (RunResult.SYNTAX_ERROR, RunResult.RUNTIME_ERROR):
-            logging.warning("PptxGenJS %s for artifact %d — asking LLM to fix", result.value, artifact_id)
-            update_studio_artifact(artifact_id, progress_message="偵測到執行錯誤，正在要求 AI 修正…")
-            pptxgenjs_code = await _fix_pptxgenjs_code(pptxgenjs_code, stderr)
-            update_studio_artifact(artifact_id, progress_message="重新執行修正後的程式碼…")
-            # Remove stale output file from first attempt before retry
-            Path(pptx_tmp).unlink(missing_ok=True)
-            result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
-
-        if result != RunResult.SUCCESS:
-            logging.error(
-                "PptxGenJS execution failed for artifact %d (%s): %s",
-                artifact_id, result, stderr,
-            )
-            update_studio_artifact(
-                artifact_id,
-                status="error",
-                error_message="PptxGenJS 執行失敗，請稍後重試。",
-            )
-            return
-
-        # Persist PPTX alongside thumbnails so it can be served as a static file
-        # at /thumbnails/{artifact_id}/slides.pptx
-        persistent_dir = _THUMB_ROOT / str(artifact_id)
-        persistent_dir.mkdir(parents=True, exist_ok=True)
-        pptx_path = persistent_dir / "slides.pptx"
-        shutil.copy2(pptx_tmp, pptx_path)
-
-        update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
-        try:
-            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
-        except Exception:
-            logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
-            update_studio_artifact(
-                artifact_id,
-                status="error",
-                error_message="縮圖生成失敗，請稍後重試。",
-            )
-            return
-
-        # Optional: Vision QA — only runs when vision_model is configured
-        from app.routers.settings import _runtime_settings
-        from app.services.vision_qa import visual_qa_check
-        from app.services.thumbnail_service import get_thumbnail_urls
-
-        if _runtime_settings.vision_model:
-            thumb_urls = get_thumbnail_urls(artifact_id)
-            thumb_paths = [_THUMB_ROOT / str(artifact_id) / Path(u).name for u in thumb_urls]
-            update_studio_artifact(artifact_id, progress_message="正在進行視覺品質檢查…")
-            issues = await visual_qa_check(
-                thumb_paths,
-                api_base_url=_runtime_settings.llm_api_base_url,
-                api_key=_runtime_settings.llm_api_key,
-                model=_runtime_settings.vision_model,
-            )
-            problem_count = sum(len(s.get("issues", [])) for s in issues)
-            if problem_count > 0:
-                logging.warning("Vision QA found %d issue(s) in artifact %d: %s", problem_count, artifact_id, issues)
-
-        # Thumbnails ready — mark artifact as done so frontend stops polling
-        update_studio_artifact(artifact_id, status="done", progress_message="")

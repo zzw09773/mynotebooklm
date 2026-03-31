@@ -2,28 +2,36 @@
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+# ---------------------------------------------------------------------------
+# Shared base — every slide model carries optional speaker notes
+# ---------------------------------------------------------------------------
+
+class SlideBase(BaseModel):
+    speaker_notes: str | None = Field(default=None, max_length=200)
 
 
 # ---------------------------------------------------------------------------
 # Layout 1: Cover
 # ---------------------------------------------------------------------------
 
-class CoverSlide(BaseModel):
+class CoverSlide(SlideBase):
     layout: Literal["cover"]
     title: str = Field(max_length=15)
-    subtitle: str | None = None
+    subtitle: str | None = Field(default=None, max_length=30)
 
 
 # ---------------------------------------------------------------------------
 # Layout 2: Section Divider
 # ---------------------------------------------------------------------------
 
-class SectionDividerSlide(BaseModel):
+class SectionDividerSlide(SlideBase):
     layout: Literal["section_divider"]
     label: str | None = None
     title: str = Field(max_length=15)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=40)
 
 
 # ---------------------------------------------------------------------------
@@ -31,12 +39,12 @@ class SectionDividerSlide(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BigNumberItem(BaseModel):
-    value: str
-    unit: str | None = None
-    label: str | None = None
+    value: str = Field(max_length=10)
+    unit: str | None = Field(default=None, max_length=10)
+    label: str | None = Field(default=None, max_length=15)
 
 
-class BigNumberSlide(BaseModel):
+class BigNumberSlide(SlideBase):
     layout: Literal["big_number"]
     title: str = Field(max_length=15)
     items: list[BigNumberItem] = Field(min_length=1, max_length=3)
@@ -52,7 +60,7 @@ class CardItem(BaseModel):
     description: str | None = Field(default=None, max_length=40)
 
 
-class CardGridSlide(BaseModel):
+class CardGridSlide(SlideBase):
     layout: Literal["card_grid"]
     title: str = Field(max_length=15)
     cards: list[CardItem] = Field(min_length=2, max_length=4)
@@ -65,10 +73,10 @@ class CardGridSlide(BaseModel):
 class DualColumnSide(BaseModel):
     icon: str | None = None
     title: str = Field(max_length=15)
-    points: list[Annotated[str, Field(max_length=25)]]
+    points: list[Annotated[str, Field(max_length=25)]] = Field(min_length=1, max_length=5)
 
 
-class DualColumnSlide(BaseModel):
+class DualColumnSlide(SlideBase):
     layout: Literal["dual_column"]
     title: str = Field(max_length=15)
     left: DualColumnSide
@@ -84,10 +92,10 @@ class ProcessStep(BaseModel):
     description: str | None = Field(default=None, max_length=40)
 
 
-class ProcessFlowSlide(BaseModel):
+class ProcessFlowSlide(SlideBase):
     layout: Literal["process_flow"]
     title: str = Field(max_length=15)
-    steps: list[ProcessStep] = Field(min_length=2, max_length=5)
+    steps: list[ProcessStep] = Field(min_length=3, max_length=5)
 
 
 # ---------------------------------------------------------------------------
@@ -96,10 +104,10 @@ class ProcessFlowSlide(BaseModel):
 
 class ContentBlock(BaseModel):
     title: str = Field(max_length=15)
-    description: str = Field(max_length=60)
+    description: str = Field(max_length=40)
 
 
-class ContentWithIconSlide(BaseModel):
+class ContentWithIconSlide(SlideBase):
     layout: Literal["content_with_icon"]
     title: str = Field(max_length=15)
     icon: str | None = None
@@ -110,9 +118,9 @@ class ContentWithIconSlide(BaseModel):
 # Layout 8: Quote
 # ---------------------------------------------------------------------------
 
-class QuoteSlide(BaseModel):
+class QuoteSlide(SlideBase):
     layout: Literal["quote_slide"]
-    quote: str = Field(max_length=80)
+    quote: str = Field(max_length=60)
     source: str | None = Field(default=None, max_length=30)
 
 
@@ -120,23 +128,41 @@ class QuoteSlide(BaseModel):
 # Layout 9: Table
 # ---------------------------------------------------------------------------
 
-class TableSlide(BaseModel):
+class TableSlide(SlideBase):
     layout: Literal["table"]
     title: str = Field(max_length=15)
-    headers: list[str] = Field(min_length=2, max_length=8)
-    rows: list[list[str]] = Field(min_length=1, max_length=12)
+    headers: list[Annotated[str, Field(max_length=15)]] = Field(min_length=2, max_length=8)
+    rows: list[list[Annotated[str, Field(max_length=20)]]] = Field(min_length=1, max_length=12)
+
+    @model_validator(mode='after')
+    def rows_match_header_count(self) -> 'TableSlide':
+        n = len(self.headers)
+        for i, row in enumerate(self.rows):
+            if len(row) != n:
+                raise ValueError(
+                    f"Row {i} has {len(row)} cells but headers has {n} columns"
+                )
+        return self
 
 
 # ---------------------------------------------------------------------------
 # Layout 10: Chart
 # ---------------------------------------------------------------------------
 
-class ChartSlide(BaseModel):
+class ChartSlide(SlideBase):
     layout: Literal["chart"]
     title: str = Field(max_length=15)
     chart_type: Literal["BAR", "PIE"]
     labels: list[str] = Field(min_length=2, max_length=8)
     values: list[float] = Field(min_length=2, max_length=8)
+
+    @model_validator(mode='after')
+    def labels_values_same_length(self) -> 'ChartSlide':
+        if len(self.labels) != len(self.values):
+            raise ValueError(
+                f"labels length ({len(self.labels)}) must equal values length ({len(self.values)})"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +174,7 @@ class ConclusionPoint(BaseModel):
     icon: str = "FaCheck"
 
 
-class ConclusionSlide(BaseModel):
+class ConclusionSlide(SlideBase):
     layout: Literal["conclusion"]
     title: str = Field(max_length=15)
     summary: str | None = Field(default=None, max_length=40)
@@ -181,3 +207,19 @@ class SlidesSpec(BaseModel):
     theme: Literal["tech", "ocean", "golden", "frost", "garden", "sports"] = "tech"
     narrative: str | None = None
     slides: list[SlideData] = Field(min_length=10, max_length=18)
+
+    @model_validator(mode='after')
+    def cover_first_conclusion_last(self) -> 'SlidesSpec':
+        if not self.slides:
+            return self
+        first = self.slides[0]
+        last = self.slides[-1]
+        if getattr(first, 'layout', None) != 'cover':
+            raise ValueError(
+                f"First slide must be 'cover', got '{getattr(first, 'layout', '?')}'"
+            )
+        if getattr(last, 'layout', None) != 'conclusion':
+            raise ValueError(
+                f"Last slide must be 'conclusion', got '{getattr(last, 'layout', '?')}'"
+            )
+        return self

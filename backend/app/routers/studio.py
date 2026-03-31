@@ -32,6 +32,8 @@ class ArtifactResponse(BaseModel):
     content_json: str
     content_text: str
     error_message: str
+    progress_message: str
+    slide_count: int
     created_at: str
     updated_at: str
 
@@ -45,6 +47,8 @@ class ArtifactResponse(BaseModel):
             content_json=a.content_json,
             content_text=a.content_text,
             error_message=a.error_message,
+            progress_message=getattr(a, "progress_message", ""),
+            slide_count=getattr(a, "slide_count", 0),
             created_at=a.created_at,
             updated_at=a.updated_at,
         )

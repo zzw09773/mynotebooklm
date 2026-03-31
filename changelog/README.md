@@ -25,25 +25,26 @@ changelog/
 
 ## 📝 版本記錄
 
-### v1.1.0 - ComfyUI Flux 幻燈片插圖自動生成 ⭐ 最新版本
-**日期：** 2026-03-30  
+### v1.1.0 - ComfyUI Flux 插圖 + 幻燈片管線全面重構 ⭐ 最新版本
+**日期：** 2026-03-30 ~ 2026-03-31  
 **分支：** `v1.1.0`  
-**Commit：** `2ebde13`
+**Commits：** `2ebde13`, `f6c7e3f`
 
 **主要改動：**
-- 🎨 ComfyUI Flux.1-dev 文生圖整合
-- 🖼️ 幻燈片自動插圖（cover / section_divider / content_with_icon）
-- 🔧 新增 ComfyUI URL 設定欄位
-- 🐳 Docker 新增 host.docker.internal 映射
-- 🛡️ 非強制設計（停用不影響幻燈片生成）
+- 🎨 ComfyUI Flux.1-dev 文生圖整合（幻燈片自動插圖）
+- 📋 Pydantic schema 強化（SlideBase、model_validator）
+- � 結構化 Vision QA（IssueType 枚舉、並行處理、自動修復）
+- �️ 刪除舊 pptx_runner.js，統一確定性渲染
+- 📊 新增 slide_count 字段，消除前端縮圖探測
 
 **統計：**
-- 7 個檔案新增或修改
-- 504 行新增 / 0 行刪除
+- 18 個檔案變更
+- 1,182 行新增 / 647 行刪除
 
 **檔案：**
 - 📄 詳細說明：`CHANGELOG_v1.1.0_comfyui-illustration.md`
-- 🔀 完整 diff：`comfyui-illustration-v1.1.0.diff`
+- 🔀 Diff (ComfyUI)：`comfyui-illustration-v1.1.0.diff`
+- 🔀 Diff (管線重構)：`slide-pipeline-overhaul-v1.1.0.diff`
 
 ---
 

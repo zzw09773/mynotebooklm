@@ -8,36 +8,44 @@ interface Props {
     code: string;
     artifactId: number;
     title?: string;
+    /** Slide count from the API (artifact.slide_count). If > 0, skips probing. */
+    slideCountFromApi?: number;
 }
 
 function thumbUrl(artifactId: number, index: number): string {
     return `/thumbnails/${artifactId}/slide_${String(index).padStart(3, "0")}.jpg`;
 }
 
-/** Probe how many JPEG thumbnails exist for this artifact by loading images. */
-async function probeSlideCount(artifactId: number): Promise<number> {
-    let count = 0;
-    while (count < 60) {
-        const ok = await new Promise<boolean>((resolve) => {
-            const img = new Image();
-            img.onload = () => resolve(true);
-            img.onerror = () => resolve(false);
-            img.src = thumbUrl(artifactId, count);
-        });
-        if (!ok) break;
-        count++;
-    }
-    return count;
-}
-
-export function SlidesViewer({ artifactId, title }: Props) {
+export function SlidesViewer({ artifactId, title, slideCountFromApi }: Props) {
     const [index, setIndex] = useState(0);
-    const [slideCount, setSlideCount] = useState<number | null>(null);
+    const [slideCount, setSlideCount] = useState<number | null>(
+        slideCountFromApi && slideCountFromApi > 0 ? slideCountFromApi : null
+    );
 
     useEffect(() => {
         setIndex(0);
-        probeSlideCount(artifactId).then(setSlideCount);
-    }, [artifactId]);
+        if (slideCountFromApi && slideCountFromApi > 0) {
+            setSlideCount(slideCountFromApi);
+        } else {
+            // Fallback: probe by loading images (legacy path, e.g. older artifacts)
+            let cancelled = false;
+            (async () => {
+                let count = 0;
+                while (count < 60) {
+                    const ok = await new Promise<boolean>((resolve) => {
+                        const img = new Image();
+                        img.onload = () => resolve(true);
+                        img.onerror = () => resolve(false);
+                        img.src = thumbUrl(artifactId, count);
+                    });
+                    if (!ok) break;
+                    count++;
+                }
+                if (!cancelled) setSlideCount(count);
+            })();
+            return () => { cancelled = true; };
+        }
+    }, [artifactId, slideCountFromApi]);
 
     const downloadUrl = `/thumbnails/${artifactId}/slides.pptx`;
 

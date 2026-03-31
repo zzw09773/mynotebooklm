@@ -67,7 +67,7 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
     if (artifact.status !== "done") return null;
 
     if (artifact.artifact_type === "slides") {
-        return <SlidesViewer code={artifact.content_text} artifactId={artifact.id} />;
+        return <SlidesViewer code={artifact.content_text} artifactId={artifact.id} slideCountFromApi={artifact.slide_count} />;
     }
 
     if (artifact.artifact_type === "report") {

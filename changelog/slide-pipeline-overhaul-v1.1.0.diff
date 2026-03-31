@@ -1,0 +1,1960 @@
+commit f6c7e3ff46c37ee9be96f91c6342cd13a13ef78e
+Author: AIA Assistant <aia@example.com>
+Date:   Tue Mar 31 05:59:08 2026 +0000
+
+    refactor: overhaul slide pipeline with structured QA, deterministic rendering, and self-repair
+    
+    - Strengthen Pydantic schemas: SlideBase with speaker_notes, model validators for table/chart/spec
+    - Delete legacy pptx_runner.js, unify on deterministic slides_renderer.js
+    - Restructure vision_qa: parallel processing, structured IssueType enum, auto-repair loop
+    - Add slide_count to StudioArtifact model (eliminate frontend thumbnail probing)
+    - Refactor studio_service: improved generation flow with validation and self-repair
+    - Enhance slides_renderer.js with better layout handling
+    - Update SlidesViewer to use slide_count from API
+
+diff --git a/backend/app/models.py b/backend/app/models.py
+index 27baaca..e3df625 100644
+--- a/backend/app/models.py
++++ b/backend/app/models.py
+@@ -93,6 +93,8 @@ def _run_migrations():
+         sa_cols = {row[1] for row in cursor.fetchall()}
+         if sa_cols and "progress_message" not in sa_cols:
+             cursor.execute("ALTER TABLE studioartifact ADD COLUMN progress_message TEXT DEFAULT ''")
++        if sa_cols and "slide_count" not in sa_cols:
++            cursor.execute("ALTER TABLE studioartifact ADD COLUMN slide_count INTEGER DEFAULT 0")
+ 
+         conn.commit()
+     except sqlite3.OperationalError as e:
+@@ -575,6 +577,7 @@ class StudioArtifact(SQLModel, table=True):
+     content_text: str = ""      # plain-text output (for copy)
+     error_message: str = ""
+     progress_message: str = ""  # human-readable progress during generation
++    slide_count: int = 0        # number of slide thumbnails (slides artifact only)
+     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+ 
+@@ -605,6 +608,7 @@ def update_studio_artifact(
+     content_text: str | None = None,
+     error_message: str | None = None,
+     progress_message: str | None = None,
++    slide_count: int | None = None,
+ ) -> StudioArtifact | None:
+     with get_session() as session:
+         artifact = session.get(StudioArtifact, artifact_id)
+@@ -620,6 +624,8 @@ def update_studio_artifact(
+             artifact.error_message = error_message
+         if progress_message is not None:
+             artifact.progress_message = progress_message
++        if slide_count is not None:
++            artifact.slide_count = slide_count
+         artifact.updated_at = datetime.now(timezone.utc).isoformat()
+         session.add(artifact)
+         session.commit()
+diff --git a/backend/app/routers/studio.py b/backend/app/routers/studio.py
+index fb3c9f8..c819355 100644
+--- a/backend/app/routers/studio.py
++++ b/backend/app/routers/studio.py
+@@ -32,6 +32,8 @@ class ArtifactResponse(BaseModel):
+     content_json: str
+     content_text: str
+     error_message: str
++    progress_message: str
++    slide_count: int
+     created_at: str
+     updated_at: str
+ 
+@@ -45,6 +47,8 @@ class ArtifactResponse(BaseModel):
+             content_json=a.content_json,
+             content_text=a.content_text,
+             error_message=a.error_message,
++            progress_message=getattr(a, "progress_message", ""),
++            slide_count=getattr(a, "slide_count", 0),
+             created_at=a.created_at,
+             updated_at=a.updated_at,
+         )
+diff --git a/backend/app/schemas/slides.py b/backend/app/schemas/slides.py
+index 25af0ca..5785020 100644
+--- a/backend/app/schemas/slides.py
++++ b/backend/app/schemas/slides.py
+@@ -2,28 +2,36 @@
+ 
+ from typing import Annotated, Literal, Union
+ 
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, model_validator
++
++
++# ---------------------------------------------------------------------------
++# Shared base — every slide model carries optional speaker notes
++# ---------------------------------------------------------------------------
++
++class SlideBase(BaseModel):
++    speaker_notes: str | None = Field(default=None, max_length=200)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Layout 1: Cover
+ # ---------------------------------------------------------------------------
+ 
+-class CoverSlide(BaseModel):
++class CoverSlide(SlideBase):
+     layout: Literal["cover"]
+     title: str = Field(max_length=15)
+-    subtitle: str | None = None
++    subtitle: str | None = Field(default=None, max_length=30)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Layout 2: Section Divider
+ # ---------------------------------------------------------------------------
+ 
+-class SectionDividerSlide(BaseModel):
++class SectionDividerSlide(SlideBase):
+     layout: Literal["section_divider"]
+     label: str | None = None
+     title: str = Field(max_length=15)
+-    description: str | None = None
++    description: str | None = Field(default=None, max_length=40)
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -31,12 +39,12 @@ class SectionDividerSlide(BaseModel):
+ # ---------------------------------------------------------------------------
+ 
+ class BigNumberItem(BaseModel):
+-    value: str
+-    unit: str | None = None
+-    label: str | None = None
++    value: str = Field(max_length=10)
++    unit: str | None = Field(default=None, max_length=10)
++    label: str | None = Field(default=None, max_length=15)
+ 
+ 
+-class BigNumberSlide(BaseModel):
++class BigNumberSlide(SlideBase):
+     layout: Literal["big_number"]
+     title: str = Field(max_length=15)
+     items: list[BigNumberItem] = Field(min_length=1, max_length=3)
+@@ -52,7 +60,7 @@ class CardItem(BaseModel):
+     description: str | None = Field(default=None, max_length=40)
+ 
+ 
+-class CardGridSlide(BaseModel):
++class CardGridSlide(SlideBase):
+     layout: Literal["card_grid"]
+     title: str = Field(max_length=15)
+     cards: list[CardItem] = Field(min_length=2, max_length=4)
+@@ -65,10 +73,10 @@ class CardGridSlide(BaseModel):
+ class DualColumnSide(BaseModel):
+     icon: str | None = None
+     title: str = Field(max_length=15)
+-    points: list[Annotated[str, Field(max_length=25)]]
++    points: list[Annotated[str, Field(max_length=25)]] = Field(min_length=1, max_length=5)
+ 
+ 
+-class DualColumnSlide(BaseModel):
++class DualColumnSlide(SlideBase):
+     layout: Literal["dual_column"]
+     title: str = Field(max_length=15)
+     left: DualColumnSide
+@@ -84,10 +92,10 @@ class ProcessStep(BaseModel):
+     description: str | None = Field(default=None, max_length=40)
+ 
+ 
+-class ProcessFlowSlide(BaseModel):
++class ProcessFlowSlide(SlideBase):
+     layout: Literal["process_flow"]
+     title: str = Field(max_length=15)
+-    steps: list[ProcessStep] = Field(min_length=2, max_length=5)
++    steps: list[ProcessStep] = Field(min_length=3, max_length=5)
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -96,10 +104,10 @@ class ProcessFlowSlide(BaseModel):
+ 
+ class ContentBlock(BaseModel):
+     title: str = Field(max_length=15)
+-    description: str = Field(max_length=60)
++    description: str = Field(max_length=40)
+ 
+ 
+-class ContentWithIconSlide(BaseModel):
++class ContentWithIconSlide(SlideBase):
+     layout: Literal["content_with_icon"]
+     title: str = Field(max_length=15)
+     icon: str | None = None
+@@ -110,9 +118,9 @@ class ContentWithIconSlide(BaseModel):
+ # Layout 8: Quote
+ # ---------------------------------------------------------------------------
+ 
+-class QuoteSlide(BaseModel):
++class QuoteSlide(SlideBase):
+     layout: Literal["quote_slide"]
+-    quote: str = Field(max_length=80)
++    quote: str = Field(max_length=60)
+     source: str | None = Field(default=None, max_length=30)
+ 
+ 
+@@ -120,24 +128,42 @@ class QuoteSlide(BaseModel):
+ # Layout 9: Table
+ # ---------------------------------------------------------------------------
+ 
+-class TableSlide(BaseModel):
++class TableSlide(SlideBase):
+     layout: Literal["table"]
+     title: str = Field(max_length=15)
+-    headers: list[str] = Field(min_length=2, max_length=8)
+-    rows: list[list[str]] = Field(min_length=1, max_length=12)
++    headers: list[Annotated[str, Field(max_length=15)]] = Field(min_length=2, max_length=8)
++    rows: list[list[Annotated[str, Field(max_length=20)]]] = Field(min_length=1, max_length=12)
++
++    @model_validator(mode='after')
++    def rows_match_header_count(self) -> 'TableSlide':
++        n = len(self.headers)
++        for i, row in enumerate(self.rows):
++            if len(row) != n:
++                raise ValueError(
++                    f"Row {i} has {len(row)} cells but headers has {n} columns"
++                )
++        return self
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Layout 10: Chart
+ # ---------------------------------------------------------------------------
+ 
+-class ChartSlide(BaseModel):
++class ChartSlide(SlideBase):
+     layout: Literal["chart"]
+     title: str = Field(max_length=15)
+     chart_type: Literal["BAR", "PIE"]
+     labels: list[str] = Field(min_length=2, max_length=8)
+     values: list[float] = Field(min_length=2, max_length=8)
+ 
++    @model_validator(mode='after')
++    def labels_values_same_length(self) -> 'ChartSlide':
++        if len(self.labels) != len(self.values):
++            raise ValueError(
++                f"labels length ({len(self.labels)}) must equal values length ({len(self.values)})"
++            )
++        return self
++
+ 
+ # ---------------------------------------------------------------------------
+ # Layout 11: Conclusion
+@@ -148,7 +174,7 @@ class ConclusionPoint(BaseModel):
+     icon: str = "FaCheck"
+ 
+ 
+-class ConclusionSlide(BaseModel):
++class ConclusionSlide(SlideBase):
+     layout: Literal["conclusion"]
+     title: str = Field(max_length=15)
+     summary: str | None = Field(default=None, max_length=40)
+@@ -181,3 +207,19 @@ class SlidesSpec(BaseModel):
+     theme: Literal["tech", "ocean", "golden", "frost", "garden", "sports"] = "tech"
+     narrative: str | None = None
+     slides: list[SlideData] = Field(min_length=10, max_length=18)
++
++    @model_validator(mode='after')
++    def cover_first_conclusion_last(self) -> 'SlidesSpec':
++        if not self.slides:
++            return self
++        first = self.slides[0]
++        last = self.slides[-1]
++        if getattr(first, 'layout', None) != 'cover':
++            raise ValueError(
++                f"First slide must be 'cover', got '{getattr(first, 'layout', '?')}'"
++            )
++        if getattr(last, 'layout', None) != 'conclusion':
++            raise ValueError(
++                f"Last slide must be 'conclusion', got '{getattr(last, 'layout', '?')}'"
++            )
++        return self
+diff --git a/backend/app/scripts/pptx_runner.js b/backend/app/scripts/pptx_runner.js
+deleted file mode 100644
+index a896863..0000000
+--- a/backend/app/scripts/pptx_runner.js
++++ /dev/null
+@@ -1,174 +0,0 @@
+-/**
+- * pptx_runner.js — Execute LLM-generated PptxGenJS code in a vm sandbox.
+- *
+- * Usage:
+- *   node pptx_runner.js <code_file.js> <output.pptx>
+- *
+- * The code file should be a JavaScript snippet that uses `pres` (PptxGenJS instance)
+- * and optionally `addIcon(sld, iconName, colorHex, x, y, w, h)`.
+- * The snippet must NOT call pres.writeFile() — the runner handles that.
+- */
+-
+-"use strict";
+-
+-const vm = require("vm");
+-const fs = require("fs");
+-
+-const PptxGenJS = require("pptxgenjs");
+-const { addIcon } = require("./icon_utils");
+-
+-// ── Main ──────────────────────────────────────────────────────
+-
+-const codeFile = process.argv[2];
+-const outputPath = process.argv[3];
+-
+-if (!codeFile || !outputPath) {
+-    console.error("Usage: node pptx_runner.js <code_file.js> <output.pptx>");
+-    process.exit(1);
+-}
+-
+-let code = fs.readFileSync(codeFile, "utf8");
+-
+-// Fix common LLM mistakes before execution
+-code = code.replace(/pres\.ShapeType\.circle\b/g, "pres.ShapeType.ellipse");
+-// Replace let/const with var to allow variable re-declaration across slides
+-// (LLMs often reuse variable names like startX/cols/rows in different slide blocks)
+-code = code.replace(/\bconst\b/g, "var");
+-code = code.replace(/\blet\b/g, "var");
+-// Fix: LLM sometimes calls sld.addIcon() as a method instead of the global addIcon(sld, ...)
+-// Match any slide variable name (sld, sld1, sld2, slide, etc.)
+-code = code.replace(/(\bsld\w*)\.addIcon\(/g, "addIcon($1, ");
+-// Fix: LLM sometimes chains non-existent methods on addText/addShape return values
+-// e.g. sld.addText(...).setTextColor("FF0000") or var tx = sld.addText(...); tx.setFontSize(18)
+-// These methods don't exist in PptxGenJS — strip them to prevent crashes.
+-code = code.replace(/\.\s*(?:setTextColor|setFontSize|setFont|setBold|setItalic|setUnderline|setAlign|setValign)\s*\([^)]*\)/g, "");
+-// Note: automatic quote-mismatch repair is NOT done here — a simple regex
+-// cannot distinguish between a genuine mismatch and valid code like '"' (a
+-// string whose content is a double-quote character).  Mismatched quotes in
+-// LLM output must be caught by re-generation or prompt improvement.
+-
+-const pres = new PptxGenJS();
+-
+-// ── Compatibility shims ───────────────────────────────────────
+-// LLMs frequently generate calls like:
+-//   sld.addText({text: "...", x: 1, fontSize: 18})   ← wrong: 1 arg with text inside
+-//   sld.addShape({type: "rect", fill: "FF0000", ...}) ← wrong: 1 arg with type inside
+-// The correct PptxGenJS API is:
+-//   sld.addText("...", {x: 1, fontSize: 18})
+-//   sld.addShape("rect", {fill: {color:"FF0000"}, ...})
+-//
+-// We patch pres.addSlide so every returned slide has corrected addText/addShape.
+-
+-function _stripHash(color) {
+-    return typeof color === "string" && color.startsWith("#") ? color.slice(1) : color;
+-}
+-
+-function _normalizeFill(fill) {
+-    if (!fill) return fill;
+-    if (typeof fill === "string") return { color: _stripHash(fill) };
+-    if (fill.color) return { ...fill, color: _stripHash(fill.color) };
+-    return fill;
+-}
+-
+-const _origAddSlide = pres.addSlide.bind(pres);
+-pres.addSlide = function(opts) {
+-    // Strip # from bkgd so PptxGenJS accepts it
+-    if (opts && typeof opts.bkgd === "string" && opts.bkgd.startsWith("#")) {
+-        opts = { ...opts, bkgd: opts.bkgd.slice(1) };
+-    }
+-    const sld = _origAddSlide(opts);
+-
+-    // addText shim: sld.addText({text, ...opts}) → sld.addText(text, opts)
+-    const _origAddText = sld.addText.bind(sld);
+-    sld.addText = function(textOrObj, textOpts) {
+-        if (textOrObj !== null && typeof textOrObj === "object" && !Array.isArray(textOrObj) && "text" in textOrObj) {
+-            const { text, ...rest } = textOrObj;
+-            textOpts = Object.assign({}, rest, textOpts || {});
+-            textOrObj = text;
+-        }
+-        // Ensure textOrObj is a valid type (string or array) — prevents
+-        // PptxGenJS internal "newObject.text.forEach is not a function"
+-        if (textOrObj == null) textOrObj = "";
+-        if (typeof textOrObj !== "string" && !Array.isArray(textOrObj)) {
+-            textOrObj = String(textOrObj);
+-        }
+-        // Guard: textOpts must be a plain object — LLM sometimes passes a string
+-        // literal like "{fontSize:40,color:theme.title}" which causes
+-        // "Cannot create property 'color' on string '...'" inside PptxGenJS
+-        if (typeof textOpts === "string") {
+-            textOpts = {};
+-        }
+-        if (textOpts && textOpts.color) textOpts.color = _stripHash(textOpts.color);
+-        if (textOpts && textOpts.fill)  textOpts.fill  = _normalizeFill(textOpts.fill);
+-        return _origAddText(textOrObj, textOpts);
+-    };
+-
+-    // addShape shim: sld.addShape({type, fill, ...opts}) → sld.addShape(type, opts)
+-    const _origAddShape = sld.addShape.bind(sld);
+-    sld.addShape = function(shapeOrType, shapeOpts) {
+-        if (shapeOrType !== null && typeof shapeOrType === "object" && "type" in shapeOrType) {
+-            const { type, ...rest } = shapeOrType;
+-            shapeOpts = Object.assign({}, rest, shapeOpts || {});
+-            shapeOrType = type;
+-        }
+-        if (shapeOpts && shapeOpts.fill)  shapeOpts.fill  = _normalizeFill(shapeOpts.fill);
+-        if (shapeOpts && shapeOpts.color) shapeOpts.color = _stripHash(shapeOpts.color);
+-        return _origAddShape(shapeOrType, shapeOpts);
+-    };
+-
+-    return sld;
+-};
+-
+-// Sandbox: only expose pres, PptxGenJS class, and addIcon helper.
+-// vm.runInContext prevents access to require, process, fs, etc.
+-const sandbox = vm.createContext({
+-    pres,
+-    PptxGenJS,
+-    addIcon,
+-    // Provide a safe console for debugging
+-    console: {
+-        log: (...args) => process.stderr.write("[slide] " + args.join(" ") + "\n"),
+-        error: (...args) => process.stderr.write("[slide:err] " + args.join(" ") + "\n"),
+-    },
+-    // Stub require — LLM sometimes adds require() when trying to fix errors.
+-    // Return an empty object instead of crashing with "require is not defined".
+-    require: (mod) => {
+-        process.stderr.write(`[pptx_runner] require("${mod}") blocked in sandbox\n`);
+-        return {};
+-    },
+-});
+-
+-// Syntax pre-check: compile only, no execution.
+-// exit(2) = syntax error (retryable by asking LLM to fix).
+-// exit(1) = runtime error (non-retryable or different fix needed).
+-try {
+-    new vm.Script(code);
+-} catch (err) {
+-    if (err instanceof SyntaxError) {
+-        console.error(`[pptx_runner] SyntaxError: ${err.message}`);
+-        process.exit(2);
+-    }
+-    // Non-SyntaxError during compilation — treat as runtime error
+-    console.error(`[pptx_runner] Compile error: ${err.message}`);
+-    process.exit(1);
+-}
+-
+-try {
+-    vm.runInContext(code, sandbox, {
+-        timeout: 30000,         // 30s max execution time
+-        displayErrors: true,
+-    });
+-} catch (err) {
+-    console.error(`[pptx_runner] Code execution failed: ${err.message}`);
+-    process.exit(1);
+-}
+-
+-// Write the PPTX — pres.writeFile returns a Promise
+-pres.writeFile({ fileName: outputPath })
+-    .then(() => {
+-        process.exit(0);
+-    })
+-    .catch((err) => {
+-        console.error(`[pptx_runner] writeFile failed: ${err.message}`);
+-        process.exit(1);
+-    });
+diff --git a/backend/app/scripts/slides_renderer.js b/backend/app/scripts/slides_renderer.js
+index 5af4c6f..a06ae64 100644
+--- a/backend/app/scripts/slides_renderer.js
++++ b/backend/app/scripts/slides_renderer.js
+@@ -20,6 +20,12 @@ function addSlide(pres, theme) {
+     return { sld, t: theme };
+ }
+ 
++function addSpeakerNotes(sld, data) {
++    if (data && data.speaker_notes) {
++        sld.addNotes(data.speaker_notes);
++    }
++}
++
+ function addHeader(sld, t, titleText) {
+     // Accent top bar
+     sld.addShape("rect", { x: 0, y: 0, w: 10, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
+@@ -41,6 +47,7 @@ function renderCover(pres, theme, data) {
+     }
+     // Bottom-right block
+     sld.addShape("rect", { x: 8.8, y: 4.6, w: 1, h: 0.8, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderSectionDivider(pres, theme, data) {
+@@ -57,6 +64,7 @@ function renderSectionDivider(pres, theme, data) {
+     if (data.description) {
+         sld.addText(data.description, { x: 0.8, y: 3.3, w: 8.4, h: 0.6, fontSize: 16, color: "FFFFFF", fontFace: FONT, shrinkText: true });
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderBigNumber(pres, theme, data) {
+@@ -78,11 +86,15 @@ function renderBigNumber(pres, theme, data) {
+         const gap = 0.45;
+         const totalW = N * cardW + (N - 1) * gap;
+         const startX = (10 - totalW) / 2;
++        const hasUnit = items.some(item => item.unit);
++        const hasLabel = items.some(item => item.label);
++        const cardH = 1.8 + (hasUnit ? 0.6 : 0) + (hasLabel ? 0.5 : 0) + 0.7; // min 3.0, approx
++        const cardHClamped = Math.min(3.6, Math.max(2.8, cardH));
+         for (let i = 0; i < N; i++) {
+             const item = items[i];
+             const cx = startX + i * (cardW + gap);
+             // Card background
+-            sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 3.6, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
++            sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: cardHClamped, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
+             // Accent top
+             sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 0.08, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
+             // Value
+@@ -97,6 +109,7 @@ function renderBigNumber(pres, theme, data) {
+             }
+         }
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderCardGrid(pres, theme, data) {
+@@ -107,11 +120,14 @@ function renderCardGrid(pres, theme, data) {
+     const gap = 0.45;
+     const totalW = N * cardW + (N - 1) * gap;
+     const startX = (10 - totalW) / 2;
++    // Dynamic card height: shorter when descriptions are brief or absent
++    const hasDesc = data.cards.some(c => c.description && c.description.length > 0);
++    const cardH = hasDesc ? 3.6 : 2.4;
+     for (let i = 0; i < N; i++) {
+         const card = data.cards[i];
+         const cx = startX + i * (cardW + gap);
+         // Card background
+-        sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 3.6, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
++        sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: cardH, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.1 });
+         // Accent top
+         sld.addShape("rect", { x: cx, y: 1.1, w: cardW, h: 0.08, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
+         // Icon
+@@ -125,6 +141,7 @@ function renderCardGrid(pres, theme, data) {
+             sld.addText(card.description, { x: cx + 0.1, y: 2.6, w: cardW - 0.2, h: 1.9, fontSize: 12, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
+         }
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderDualColumn(pres, theme, data) {
+@@ -153,8 +170,10 @@ function renderDualColumn(pres, theme, data) {
+             }
+         }
+     }
+-    // VS label in center
+-    sld.addText("VS", { x: 4.55, y: 2.3, w: 0.9, h: 0.7, fontSize: 20, bold: true, color: t.accent, align: "center", fontFace: FONT, shrinkText: true });
++    // VS label in center — rendered AFTER cards so it appears on top (z-order)
++    sld.addShape("ellipse", { x: 4.35, y: 2.55, w: 1.3, h: 1.3, fill: { color: t.bg }, line: { color: t.accent, size: 2 } });
++    sld.addText("VS", { x: 4.35, y: 2.7, w: 1.3, h: 1.0, fontSize: 22, bold: true, color: t.accent, align: "center", valign: "middle", fontFace: FONT });
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderProcessFlow(pres, theme, data) {
+@@ -163,8 +182,10 @@ function renderProcessFlow(pres, theme, data) {
+     const N = data.steps.length;
+     const circR = 0.35;
+     const circD = circR * 2; // 0.7
+-    const startX = 0.5 + circR; // 0.85 (circle center x of first step)
+-    const gap = (9.0 - N * circD) / (N - 1); // space between circles
++    const rawGap = (N === 1) ? 0 : (9.0 - N * circD) / (N - 1);
++    const gap = Math.min(rawGap, 2.0);   // max 2" gap between circles
++    const totalW = N * circD + (N - 1) * gap;
++    const startX = (10 - totalW) / 2 + circR;  // always center the group
+ 
+     for (let i = 0; i < N; i++) {
+         const step = data.steps[i];
+@@ -186,6 +207,7 @@ function renderProcessFlow(pres, theme, data) {
+             sld.addText(step.description, { x: cx - 0.6, y: 2.95, w: 1.2, h: 0.9, fontSize: 11, color: t.text, align: "center", fontFace: FONT, shrinkText: true });
+         }
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderContentWithIcon(pres, theme, data) {
+@@ -207,6 +229,7 @@ function renderContentWithIcon(pres, theme, data) {
+             sld.addText(block.description, { x: 2.0, y: yPos + 0.45, w: 7.5, h: 0.55, fontSize: 13, color: t.text, fontFace: FONT, shrinkText: true });
+         }
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderQuote(pres, theme, data) {
+@@ -223,6 +246,7 @@ function renderQuote(pres, theme, data) {
+     if (data.source) {
+         sld.addText("— " + data.source, { x: 1.2, y: 4.1, w: 7.6, h: 0.4, fontSize: 14, color: theme.muted, align: "center", fontFace: FONT, shrinkText: true });
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderTable(pres, theme, data) {
+@@ -241,13 +265,22 @@ function renderTable(pres, theme, data) {
+             options: { color: t.text, fill: { color: ri % 2 === 0 ? t.cardBg : t.bg }, fontSize: 12, fontFace: FONT }
+         }))
+     );
++    // Dynamic vertical centering: row height ~0.35", available area y=1.1..5.1 (4.0")
++    const rowH = 0.35;
++    const totalRows = 1 + data.rows.length; // header + data
++    const tableH = totalRows * rowH;
++    const availableTop = 1.1;
++    const availableH = 4.0;
++    const startY = availableTop + Math.max(0, (availableH - tableH) / 2);
+     sld.addTable([headerRow, ...dataRows], {
+         x: 0.5,
+-        y: 1.1,
++        y: startY,
+         w: 9,
+         colW: Array(data.headers.length).fill(9 / data.headers.length),
+-        border: { type: "none" }
++        border: { type: "none" },
++        rowH: rowH,
+     });
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderChart(pres, theme, data) {
+@@ -269,8 +302,11 @@ function renderChart(pres, theme, data) {
+         } else {
+             // PIE
+             sld.addChart(pres.ChartType.pie, chartData, {
+-                x: 2.5, y: 1.2, w: 5, h: 3.8,
++                x: 2.5, y: 1.1, w: 5, h: 3.0,
+                 showPercent: true,
++                showLegend: true,
++                legendPos: 'b',
++                legendFontSize: 11,
+                 chartColors: [t.accent, t.muted, t.text, "4CAF50", "FF9800", "9C27B0", "F44336", "2196F3"],
+                 dataLabelFontSize: 12,
+             });
+@@ -284,6 +320,7 @@ function renderChart(pres, theme, data) {
+         ]);
+         sld.addTable(rows, { x: 1.5, y: 1.3, w: 7, colW: [5, 2] });
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ function renderConclusion(pres, theme, data) {
+@@ -295,14 +332,18 @@ function renderConclusion(pres, theme, data) {
+     // Accent line
+     sld.addShape("rect", { x: 0.5, y: 1.35, w: 2, h: 0.06, fill: { color: t.accent }, line: { color: t.accent, size: 0 } });
+     // Summary (if present)
++    let pointsStartY = 1.9;
+     if (data.summary) {
+         sld.addText(data.summary, { x: 0.5, y: 1.55, w: 9, h: 0.55, fontSize: 16, italic: true, color: t.accent, fontFace: FONT, shrinkText: true });
++        pointsStartY = 2.15; // push points down when summary present
+     }
+-    // Points
++    // Points — dynamic spacing based on count to use available space
+     if (data.points) {
++        const availH = 5.2 - pointsStartY;
++        const pointH = Math.min(1.0, availH / data.points.length);
+         for (let i = 0; i < data.points.length; i++) {
+             const point = data.points[i];
+-            const yPos = 1.9 + i * 1.0;
++            const yPos = pointsStartY + i * pointH;
+             // Point card background
+             sld.addShape("rect", { x: 0.5, y: yPos, w: 9, h: 0.75, fill: { color: t.cardBg }, line: { color: t.cardBg, size: 0 }, rectRadius: 0.08 });
+             // Icon
+@@ -311,6 +352,7 @@ function renderConclusion(pres, theme, data) {
+             sld.addText(point.text, { x: 1.2, y: yPos + 0.15, w: 8.1, h: 0.45, fontSize: 15, color: t.title, fontFace: FONT, shrinkText: true });
+         }
+     }
++    addSpeakerNotes(sld, data);
+ }
+ 
+ const RENDERERS = {
+diff --git a/backend/app/services/pptx_runner_service.py b/backend/app/services/pptx_runner_service.py
+index 1763398..90408d2 100644
+--- a/backend/app/services/pptx_runner_service.py
++++ b/backend/app/services/pptx_runner_service.py
+@@ -1,16 +1,12 @@
+ """
+-pptx_runner_service.py — Execute LLM-generated PptxGenJS code via a Node.js subprocess.
++pptx_runner_service.py — Render validated SlidesSpec JSON to PPTX via Node.js.
+ 
+-The Node.js runner (app/scripts/pptx_runner.js) receives the code in a temp file,
+-executes it inside a vm sandbox, and writes the resulting PPTX to disk.
++The deterministic renderer (app/scripts/slides_renderer.js) receives the JSON
++in a temp file and writes the resulting PPTX to disk.
+ 
+-Exit codes from the runner:
++Exit codes from the renderer:
+   0 = success
+-  1 = runtime error (code executed but threw an exception)
+-  2 = syntax error (code could not be compiled; retryable by the LLM)
+-
+-Security: asyncio.create_subprocess_exec is used (not shell=True), which prevents
+-shell injection. The code_file path is passed as a positional argv argument.
++  1 = runtime error
+ """
+ import asyncio
+ import logging
+@@ -20,96 +16,11 @@ from pathlib import Path
+ 
+ log = logging.getLogger(__name__)
+ 
+-_RUNNER_SCRIPT = Path(__file__).parent.parent / "scripts" / "pptx_runner.js"
+-
+ 
+ class RunResult(str, Enum):
+     SUCCESS = "success"
+-    SYNTAX_ERROR = "syntax_error"   # exit 2 — LLM can fix and retry
+-    RUNTIME_ERROR = "runtime_error" # exit 1 — execution failed
+-    TIMEOUT = "timeout"             # process killed due to timeout
+-
+-
+-# Default preamble injected when the LLM omits it (tech-innovation theme).
+-# This prevents "theme is not defined" / "FONT is not defined" runtime errors.
+-_DEFAULT_PREAMBLE = """\
+-pres.defineLayout({name:"16x9",width:10,height:5.625});
+-pres.layout="16x9";
+-var theme={bg:"1E1E1E",accent:"0066FF",title:"FFFFFF",text:"CCCCCC",muted:"888888",cardBg:"2A2A2A"};
+-var FONT="Microsoft JhengHei";
+-"""
+-
+-
+-def _preprocess_code(code: str) -> str:
+-    """
+-    Fix common LLM code-generation mistakes before passing to Node.js runner.
+-    These repairs are done in Python because Python's re module behaves
+-    predictably with Unicode strings.
+-    """
+-    # Strip trailing non-JS lines added by LLMs (e.g. "--- End of JS code ---",
+-    # markdown separators, explanatory text, or lone closing braces that have
+-    # no matching open brace in the snippet).
+-    lines = code.rstrip().split("\n")
+-    while lines and (
+-        lines[-1].strip().startswith("---")
+-        or lines[-1].strip().startswith("//")
+-        or lines[-1].strip() == ""
+-    ):
+-        lines.pop()
+-    code = "\n".join(lines)
+-
+-    # Brace balance: remove extra trailing `}` that the LLM adds when it
+-    # imagines the snippet is inside a function or block scope.
+-    # Use a simplified count (ignores strings/comments — good enough in practice).
+-    extra_close = code.count("}") - code.count("{")
+-    if extra_close > 0:
+-        log.warning("LLM output has %d unmatched closing brace(s) — stripping from end", extra_close)
+-        result = code
+-        for _ in range(extra_close):
+-            idx = result.rfind("}")
+-            if idx >= 0:
+-                result = result[:idx] + result[idx + 1:]
+-        code = result
+-
+-    # Inject preamble if LLM forgot to define theme/FONT/layout.
+-    # The check is simple: if neither "var theme" nor "const theme" appears in
+-    # the code, the LLM skipped the preamble and "theme is not defined" would
+-    # occur at runtime.  Prepending the default preamble fixes this without
+-    # touching any slide content.
+-    if "theme" not in code:
+-        log.warning("LLM output missing 'theme' definition — injecting default preamble")
+-        code = _DEFAULT_PREAMBLE + code
+-    elif not code.lstrip().startswith("pres.defineLayout"):
+-        # theme is defined somewhere but defineLayout is missing at the top
+-        if "pres.defineLayout" not in code:
+-            log.warning("LLM output missing pres.defineLayout — injecting layout header")
+-            code = (
+-                'pres.defineLayout({name:"16x9",width:10,height:5.625});\npres.layout="16x9";\n'
+-                + code
+-            )
+-
+-    # Strip LLM's own PptxGenJS initialization — the sandbox already provides
+-    # `pres` (PptxGenJS instance) and `PptxGenJS` (the class).
+-    # If the LLM re-declares them via require/new, it shadows the sandbox
+-    # globals or fails ("PptxGenJS is not a constructor" when require returns {}).
+-    import re
+-    code = re.sub(
+-        r"^\s*(?:const|var|let)\s+PptxGenJS\s*=\s*require\(['\"]pptxgenjs['\"]\);?\s*$",
+-        "",
+-        code,
+-        flags=re.MULTILINE,
+-    )
+-    code = re.sub(
+-        r"^\s*(?:const|var|let)\s+pres\s*=\s*new\s+PptxGenJS\s*\(\s*\);?\s*$",
+-        "",
+-        code,
+-        flags=re.MULTILINE,
+-    )
+-
+-    # Note: automatic quote-mismatch repair ("value' → "value") is intentionally
+-    # NOT done here — the regex cannot safely distinguish mismatched quotes from
+-    # valid JS like '"'  (a string containing a single double-quote character).
+-    return code
++    RUNTIME_ERROR = "runtime_error"  # exit 1 — execution failed
++    TIMEOUT = "timeout"              # process killed due to timeout
+ 
+ 
+ _RENDERER_SCRIPT = Path(__file__).parent.parent / "scripts" / "slides_renderer.js"
+@@ -174,70 +85,3 @@ async def execute_slides_json(
+ 
+     finally:
+         Path(json_file).unlink(missing_ok=True)
+-
+-
+-async def execute_pptxgenjs(
+-    code: str, output_path: str, timeout: int = 60
+-) -> tuple[RunResult, str]:
+-    """
+-    Execute LLM-generated PptxGenJS code to produce a .pptx file.
+-
+-    Args:
+-        code:        JavaScript snippet using the `pres` variable.
+-        output_path: Destination path for the generated PPTX.
+-        timeout:     Max seconds to wait for Node.js subprocess.
+-
+-    Returns:
+-        (RunResult, stderr_text) tuple.
+-        RunResult.SUCCESS means the PPTX file was produced successfully.
+-    """
+-    code = _preprocess_code(code)
+-    with tempfile.NamedTemporaryFile(suffix=".js", mode="w", delete=False, encoding="utf-8") as f:
+-        f.write(code)
+-        code_file = f.name
+-
+-    try:
+-        # Use create_subprocess_exec (not shell=True) to avoid shell injection.
+-        proc = await asyncio.create_subprocess_exec(
+-            "node",
+-            str(_RUNNER_SCRIPT),
+-            code_file,
+-            output_path,
+-            stdout=asyncio.subprocess.PIPE,
+-            stderr=asyncio.subprocess.PIPE,
+-            env={**__import__("os").environ, "NODE_PATH": "/usr/lib/node_modules"},
+-        )
+-        try:
+-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+-        except asyncio.TimeoutError:
+-            proc.kill()
+-            log.error("PptxGenJS runner timed out after %ds", timeout)
+-            return RunResult.TIMEOUT, f"Timed out after {timeout}s"
+-
+-        stderr_text = stderr.decode(errors="replace")
+-
+-        if proc.returncode == 2:
+-            log.error("PptxGenJS runner syntax error: %s", stderr_text)
+-            return RunResult.SYNTAX_ERROR, stderr_text
+-
+-        if proc.returncode != 0:
+-            log.error(
+-                "PptxGenJS runner failed (exit %d): %s",
+-                proc.returncode,
+-                stderr_text,
+-            )
+-            return RunResult.RUNTIME_ERROR, stderr_text
+-
+-        if not Path(output_path).exists():
+-            log.error("PptxGenJS runner returned 0 but output file missing: %s", output_path)
+-            return RunResult.RUNTIME_ERROR, "Output file not created"
+-
+-        log.info(
+-            "PptxGenJS runner produced %s (%d bytes)",
+-            output_path,
+-            Path(output_path).stat().st_size,
+-        )
+-        return RunResult.SUCCESS, ""
+-
+-    finally:
+-        Path(code_file).unlink(missing_ok=True)
+diff --git a/backend/app/services/studio_service.py b/backend/app/services/studio_service.py
+index d024633..423f12a 100644
+--- a/backend/app/services/studio_service.py
++++ b/backend/app/services/studio_service.py
+@@ -20,6 +20,8 @@ from app.models import (
+     update_studio_artifact,
+     STUDIO_ARTIFACT_TYPES,
+ )
++from pydantic import ValidationError
++from app.schemas.slides import SlidesSpec
+ 
+ # ── System prompts ────────────────────────────────────────────
+ 
+@@ -39,6 +41,44 @@ PODCAST_PROMPT = """你是一位專業的 Podcast 腳本撰寫人。請根據以
+ 5. 輸出必須是合法的 JSON。
+ """
+ 
++_SLIDES_OUTLINE_PROMPT = """\
++你是簡報架構師。根據以下文件內容，先規劃一份簡報大綱，再由另一個步驟填充完整內容。
++
++請分析文件主題，輸出 JSON 格式的大綱：
++{
++  "narrative": "匯報|提案|分析|教學",
++  "theme": "tech|ocean|golden|frost|garden|sports",
++  "chapters": [
++    {
++      "chapter_title": "章節標題",
++      "key_point": "這章節要傳達的核心論點（一句話）",
++      "suggested_layout": "建議版面類型（如 big_number、card_grid 等）",
++      "data_available": true或false（文件中是否有具體數字/統計）
++    }
++  ]
++}
++
++選擇敘事弧線的依據：
++- 匯報：文件描述現況、成效、數據 → 背景→發現→數據→啟示→結論
++- 提案：文件提出解決方案 → 痛點→方案→佐證→行動
++- 分析：文件分析法規、政策、概念 → 定義→拆解→利弊→建議
++- 教學：文件解釋知識、技術、流程 → 重要性→概念→步驟→回顧
++
++選擇主題色票的依據：
++- tech：科技、AI、軟體、數位轉型
++- ocean：環境、醫療、教育、公共政策、法律
++- golden：金融、商業、行銷、品牌
++- frost：學術、研究、法律白皮書（嚴謹正式）
++- garden：農業、食品、永續、ESG
++- sports：體育、賽事、健康、活力
++
++規則：
++- chapters 數量 12-15 個（對應 12-15 頁內容，不含封面和結尾）
++- 嚴格按照敘事弧線的邏輯順序排列 chapters
++- suggested_layout 從以下選擇：big_number、card_grid、dual_column、process_flow、content_with_icon、quote_slide、table、chart、section_divider
++- 只輸出 JSON，不加說明文字
++"""
++
+ SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON 格式的簡報結構。
+ 
+ ## 色票選擇（根據文件主題選一）
+@@ -58,40 +98,77 @@ SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON 
+ - card_grid: 並列卡片（title, cards:[{icon,title,description}], 2-4張）
+ - dual_column: 比較（title, left/right:{icon,title,points:[]}）
+ - process_flow: 流程步驟（title, steps:[{title,description}], 2-5步）
+-- content_with_icon: 圖文（title, icon, blocks:[{title,description}], 1-4個）
++- content_with_icon: 圖文（title, icon, blocks:[{title,description}], 1-4個）⚠️ blocks 為必填，不可省略
+ - quote_slide: 金句（quote, source）
+-- table: 表格（title, headers:[], rows:[[]]）
+-- chart: 圖表（title, chart_type:BAR|PIE, labels:[], values:[]）⚠️ 僅當文件含具體數字時使用
++- table: 表格（title, headers:[], rows:[[]]）⚠️ rows 中每個子陣列長度必須等於 headers 長度，否則驗證失敗
++- chart: 圖表（title, chart_type:BAR|PIE, labels:[], values:[]）⚠️ labels 與 values 長度必須相同；僅當文件含具體數字時使用
+ - conclusion: 結尾（title, summary, points:[{text,icon}]）
+ 
+-可用 icon：FaShieldAlt FaChartLine FaUsers FaLightbulb FaDatabase FaGlobe FaLock FaCheck FaGavel FaBook FaChartBar FaSearch FaFlag FaRocket FaHandshake FaCog
++可用 icon 及語義對照（先判斷概念語義，再對應 icon）：
++成長/趨勢/成果 → FaChartLine | 保護/防禦/安全 → FaShieldAlt
++創意/策略/靈感 → FaLightbulb | 法律/規範/裁定 → FaGavel
++資料/儲存/結構 → FaDatabase  | 全球/國際/網路 → FaGlobe
++人群/團隊/組織 → FaUsers     | 驗證/完成/通過 → FaCheck
++隱私/權限/加密 → FaLock      | 學習/知識/文獻 → FaBook
++搜尋/分析/調查 → FaSearch    | 目標/里程碑/旗幟 → FaFlag
++發射/行動/創新 → FaRocket    | 合作/協議/握手 → FaHandshake
++系統/設定/機制 → FaCog        | 報表/統計/數據 → FaChartBar
++
++Icon 選用三規則：
++1. 先將概念抽象成語義類別，再從對照表選最接近的 icon
++2. 同一頁多個 icon 必須在形狀上明顯不同，讓讀者掃一眼即可分辨各塊的差異
++3. 每個 icon 在整份簡報最多出現 2 次
+ 
+ ## 內容規則
+ - 首頁 cover，末頁 conclusion
+ - 相鄰兩頁不可相同 layout，全簡報 ≥5 種不同 layout
++- 同一 layout 類型在全簡報最多出現 2 次；每個 layout 類型出現後，至少間隔 3 頁才可再次使用
+ - 繁體中文，不編造數據或引言
+ - 標題≤15字，要點≤25字
+ - 有明確數字優先用 big_number；chart 僅用於文件有具體數字時
+ - 敘事弧線：匯報(背景→發現→數據→啟示→結論) | 提案(痛點→方案→佐證→行動) | 分析(定義→拆解→利弊→建議) | 教學(重要性→概念→步驟→回顧)
+ 
++## 文字密度規則（超出上限驗證會失敗）
++投影片只放關鍵字短語；完整解釋、背景脈絡放 speaker_notes。
++
++| 欄位 | 上限 |
++|------|------|
++| 所有版面 title | 15字 |
++| cover subtitle | 30字 |
++| section_divider description | 40字 |
++| process_flow step description | 40字 |
++| content_with_icon block description | 40字 |
++| big_number value | 10字 |
++| big_number unit / label | 10 / 15字 |
++| quote_slide quote | 60字 |
++| table header cell | 15字 |
++| table data cell | 20字 |
++| speaker_notes | 50–200字 |
++
++description 欄位一律使用純繁體中文短語，禁止夾雜英文術語（如 stakeholder、organisational）；英文專有名詞移到 speaker_notes。
++
++⚠️ description 欄位必須補充 title 以外的資訊，不得重複或意譯 title 內容。錯誤示範：title="坦承接受懲罰" description="坦承並接受懲罰" — 完全重複，不可接受。
++
+ ## 輸出範例（4頁示意，實際需封面＋12-15頁內容＋結尾，共 14-17 頁）
+ ```json
+ {
+   "theme": "tech",
+   "narrative": "匯報",
+   "slides": [
+-    {"layout": "cover", "title": "AI 導入成效報告", "subtitle": "2026 Q1 季度回顧"},
++    {"layout": "cover", "title": "AI 導入成效報告", "subtitle": "2026 Q1 季度回顧",
++     "speaker_notes": "本報告摘要 2026 第一季 AI 系統導入後的主要成效，涵蓋模型準確率、處理速度提升與下一步擴展計畫。"},
+     {"layout": "big_number", "title": "關鍵指標", "items": [
+       {"value": "98%", "unit": "準確率", "label": "模型推論"},
+       {"value": "3.2x", "unit": "加速", "label": "處理速度"}
+-    ]},
++    ], "speaker_notes": "兩項核心指標均超越原訂目標。98% 準確率是在正式環境連續兩周測試後取得的穩定值；3.2 倍加速效果已通過壓力測試驗證。"},
+     {"layout": "card_grid", "title": "三大策略方向", "cards": [
+       {"icon": "FaRocket", "title": "擴展部署", "description": "推廣至五個部門"},
+       {"icon": "FaDatabase", "title": "資料整合", "description": "統一資料湖架構"},
+       {"icon": "FaUsers", "title": "人才培訓", "description": "培訓兩百名工程師"}
+-    ]},
++    ], "speaker_notes": "三項策略並行推進：部署擴展聚焦高流量業務部門；資料整合解決現有資料孤島問題；人才培訓確保技術落地後有足夠人力維運。"},
+     {"layout": "conclusion", "title": "總結與展望", "summary": "AI 導入已見初步成效",
+-     "points": [{"text": "模型準確率達 98%"}, {"text": "處理速度提升 3.2 倍"}, {"text": "下季度擴展至全公司", "icon": "FaRocket"}]}
++     "points": [{"text": "模型準確率達 98%"}, {"text": "處理速度提升 3.2 倍"}, {"text": "下季擴展至全公司", "icon": "FaRocket"}],
++     "speaker_notes": "本季成效驗證了 AI 導入策略的可行性。下一季將全面推廣，預期帶來更大規模的效率提升。歡迎提問。"}
+   ]
+ }
+ ```
+@@ -100,6 +177,7 @@ SLIDES_PROMPT = """你是專業簡報設計師。根據文件內容輸出 JSON 
+ - 只輸出 JSON，不加 ```json 標記或任何說明文字
+ - slides 陣列必須包含 14-17 頁（1 封面 ＋ 12-15 內容頁 ＋ 1 結尾）
+ - 充分利用文件素材，每個主題/章節至少一頁，不要將多個主題壓縮在一頁
++- 每頁必須包含 speaker_notes（50–200字的繁體中文完整句子，供演講者現場參考）
+ - 輸出必須是合法的 JSON
+ """
+ 
+@@ -318,11 +396,15 @@ async def _fix_slides_json(raw_json: str, validation_error: str) -> str:
+     )
+     try:
+         parts: list[str] = []
+-        async for chunk in await llm.astream_chat(messages):
+-            if chunk.delta:
+-                parts.append(chunk.delta)
++        async with asyncio.timeout(90):
++            async for chunk in await llm.astream_chat(messages):
++                if chunk.delta:
++                    parts.append(chunk.delta)
+         fixed = "".join(parts).strip()
+         return _sanitize_json(fixed) if fixed else raw_json
++    except asyncio.TimeoutError:
++        logging.warning("_fix_slides_json timed out after 90s — using original JSON")
++        return raw_json
+     except Exception:
+         logging.exception("_fix_slides_json LLM call failed — using original JSON")
+         return raw_json
+@@ -355,6 +437,38 @@ def _format_text(artifact_type: str, data: dict) -> str:
+ 
+ # ── Core generation function ──────────────────────────────────
+ 
++async def _generate_slides_outline(
++    combined_text: str,
++    client,
++) -> dict | None:
++    """
++    Stage 1 of two-stage slides generation: produce a narrative outline.
++    Returns a dict with keys: narrative, theme, chapters — or None on failure.
++    """
++    from app.services.llm_service import get_llm
++    llm = get_llm(async_client=client)
++    user_msg = f"請分析以下文件內容並規劃簡報大綱：\n\n{combined_text}"
++    messages = [
++        ChatMessage(role=MessageRole.SYSTEM, content=_SLIDES_OUTLINE_PROMPT),
++        ChatMessage(role=MessageRole.USER, content=user_msg),
++    ]
++    try:
++        parts: list[str] = []
++        async with asyncio.timeout(120):
++            async for chunk in await llm.astream_chat(messages):
++                if chunk.delta:
++                    parts.append(chunk.delta)
++        raw = "".join(parts).strip()
++        raw = _strip_code_fence(raw)
++        outline = json.loads(raw)
++        if isinstance(outline, dict) and "chapters" in outline:
++            return outline
++        return None
++    except Exception:
++        logging.warning("Slides outline generation failed — proceeding without outline")
++        return None
++
++
+ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: str) -> None:
+     """
+     Background task: collect all document text for the project,
+@@ -391,6 +505,7 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+ 
+         # Slides use a tighter text budget to keep the total LLM context smaller,
+         # which reduces model reasoning time (TTFT) significantly.
++        outline = None
+         if artifact_type == "slides":
+             parts_slides: list[str] = []
+             for doc in docs:
+@@ -407,12 +522,26 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+                 combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
+ 
+         prompt = ARTIFACT_PROMPTS[artifact_type]
+-        user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
+ 
+         # Use a fresh AsyncClient per generation to avoid stale connection
+         # pool state after asyncio cancellation (previous timeout can corrupt
+         # the shared pool, causing the next streaming request to receive 0 bytes).
+         _stream_client = _fresh_async_client()
++
++        if artifact_type == "slides":
++            # Two-stage generation: first generate an outline to anchor the narrative structure
++            update_studio_artifact(artifact_id, progress_message="AI 正在分析文件架構，規劃敘事大綱…")
++            outline = await _generate_slides_outline(combined, _stream_client)
++
++        if artifact_type == "slides" and outline:
++            outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
++            user_msg = (
++                f"【敘事大綱（請嚴格按照此架構生成簡報）】\n{outline_json}\n\n"
++                f"【文件內容】\n{combined}"
++            )
++        else:
++            user_msg = f"以下是專案的所有文件內容：\n\n{combined}"
++
+         # Slides may use a dedicated larger model (slides_model) to improve
+         # generation quality and reduce TTFT on complex prompts.
+         from app.routers.settings import _runtime_settings as _rs
+@@ -496,9 +625,6 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+         if artifact_type == "slides":
+             # LLM returns structured JSON (SlidesSpec), not PptxGenJS code.
+             # Validate via Pydantic, fix once if needed, then hand off to renderer.
+-            from pydantic import ValidationError
+-            from app.schemas.slides import SlidesSpec
+-
+             sanitized = _sanitize_json(raw)
+             spec: SlidesSpec | None = None
+             try:
+@@ -530,7 +656,17 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
+                 content_text="",
+                 progress_message="AI 產出完成，正在建立簡報…",
+             )
+-            asyncio.create_task(_generate_slides_from_json(artifact_id, spec_json))
++            _task = asyncio.create_task(_generate_slides_from_json(artifact_id, spec_json))
++
++            def _log_task_exception(fut: asyncio.Future) -> None:
++                if fut.exception():
++                    logging.error(
++                        "Background slides task failed for artifact=%d: %s",
++                        artifact_id,
++                        fut.exception(),
++                    )
++
++            _task.add_done_callback(_log_task_exception)
+             return
+ 
+         data = json.loads(raw)
+@@ -615,7 +751,6 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) ->
+         from app.services import comfyui_service
+         if _rs_slides.comfyui_api_url and await comfyui_service.is_available():
+             try:
+-                from app.schemas.slides import SlidesSpec
+                 spec = SlidesSpec.model_validate_json(spec_json)
+                 await _add_illustrations_to_pptx(artifact_id, pptx_path, spec)
+             except Exception:
+@@ -623,7 +758,7 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) ->
+ 
+         update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
+         try:
+-            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
++            _, slide_count = await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+         except Exception:
+             logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+             update_studio_artifact(
+@@ -633,9 +768,14 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) ->
+             )
+             return
+ 
+-        # Optional Vision QA
++        if slide_count > 0:
++            update_studio_artifact(artifact_id, slide_count=slide_count)
++
++        # Optional Vision QA — only runs when vision_model is configured.
++        # When issues are found we attempt one automated re-render with an
++        # LLM-assisted fix prompt before giving up and marking as done.
+         from app.routers.settings import _runtime_settings
+-        from app.services.vision_qa import visual_qa_check
++        from app.services.vision_qa import visual_qa_check, classify_issues, IssueType
+         from app.services.thumbnail_service import get_thumbnail_urls
+ 
+         if _runtime_settings.vision_model:
+@@ -654,6 +794,56 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) ->
+                     "Vision QA found %d issue(s) in artifact %d: %s",
+                     problem_count, artifact_id, issues,
+                 )
++                # ── Feedback loop: attempt one automated fix ──────────────
++                issue_types = classify_issues(issues)
++                fixed_spec_json = await _apply_qa_fixes(spec_json, issues, issue_types)
++                if fixed_spec_json:
++                    logging.info(
++                        "Vision QA: retrying artifact=%d with auto-fixed spec (issues: %s)",
++                        artifact_id, [t.value for t in issue_types],
++                    )
++                    update_studio_artifact(
++                        artifact_id,
++                        progress_message="偵測到視覺問題，正在自動修正並重新渲染…",
++                    )
++                    # Light retry: re-render PPTX, re-embed ComfyUI illustrations, re-generate thumbnails
++                    try:
++                        retry_pptx = str(Path(tmp) / "slides_retry.pptx")
++                        result2, stderr2 = await execute_slides_json(fixed_spec_json, retry_pptx)
++                        if result2 == RunResult.SUCCESS:
++                            shutil.copy2(retry_pptx, pptx_path)
++                            # Re-embed existing ComfyUI illustrations (already generated, just need re-embed)
++                            if _rs_slides.comfyui_api_url:
++                                try:
++                                    from app.schemas.slides import SlidesSpec as _RetrySpec
++                                    retry_spec = _RetrySpec.model_validate_json(fixed_spec_json)
++                                    await asyncio.to_thread(
++                                        _embed_images_in_pptx,
++                                        pptx_path,
++                                        [
++                                            (idx, s)
++                                            for idx, s in enumerate(retry_spec.slides)
++                                            if getattr(s, "layout", "") in _ILLUSTRATABLE_LAYOUTS
++                                        ][:_MAX_ILLUSTRATIONS],
++                                        [
++                                            (_COMFYUI_IMG_ROOT / str(artifact_id) / f"slide_{idx:03d}.png")
++                                            if (_COMFYUI_IMG_ROOT / str(artifact_id) / f"slide_{idx:03d}.png").exists()
++                                            else None
++                                            for idx, s in enumerate(retry_spec.slides)
++                                            if getattr(s, "layout", "") in _ILLUSTRATABLE_LAYOUTS
++                                        ][:_MAX_ILLUSTRATIONS],
++                                    )
++                                    logging.info("Re-embedded ComfyUI illustrations after QA retry for artifact=%d", artifact_id)
++                                except Exception:
++                                    logging.exception("Failed to re-embed illustrations after QA retry for artifact=%d", artifact_id)
++                            _, sc = await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
++                            if sc > 0:
++                                update_studio_artifact(artifact_id, slide_count=sc)
++                            logging.info("Vision QA retry render succeeded for artifact=%d", artifact_id)
++                        else:
++                            logging.warning("Vision QA retry render failed for artifact=%d: %s", artifact_id, stderr2)
++                    except Exception:
++                        logging.exception("Vision QA retry failed for artifact=%d — accepting original", artifact_id)
+ 
+         elapsed = time.monotonic() - t0
+         logging.info(
+@@ -663,34 +853,115 @@ async def _generate_slides_from_json_inner(artifact_id: int, spec_json: str) ->
+         update_studio_artifact(artifact_id, status="done", progress_message="")
+ 
+ 
+-# ── ComfyUI slide illustration helpers ────────────────────────────────────────
++# ── Vision QA auto-fix helpers ────────────────────────────────────────────────
+ 
+-_SLIDE_ILLUSTRATION_PROMPT = """\
+-You are an expert at creating image prompts for business presentation slides.
+-Write ONE English image generation prompt for Flux AI based on the slide details below.
++_QA_FIX_PROMPT = """\
++你是簡報文字修正助手。以下投影片有視覺品質問題，請修正**僅有問題的投影片**。
+ 
+-CRITICAL RULES:
+-- Output must be 100% English — Flux does not support Chinese
+-- Visually represent the SPECIFIC topic using relevant objects/icons, NOT generic nature or landscapes
+-- Topic-to-visual mapping examples:
+-    AI / machine learning  → neural network, circuit nodes, data streams, robot icon
+-    compliance / legal     → shield, document, checkmark, balance scale, seal, lock
+-    risk / security        → shield, lock, firewall, warning icon, protected layers
+-    data / metrics         → bar chart, dashboard, data nodes, graph, analytics
+-    process / workflow     → flowchart arrows, gear, pipeline, connected steps
+-    finance / investment   → coins, chart arrow, growth bar, currency symbol
+-
+-Style instructions:
+-- Flat vector illustration, clean minimal, corporate color palette
+-- Light or white background; avoid dark moody scenes
+-- No human faces; no text or letters in the image
+-- Landscape 4:3 format suitable as a slide visual
+-
+-Slide layout : {layout}
+-Slide title  : {title}
+-Slide content: {content_hint}
+-
+-Output ONLY the prompt (20-45 words), nothing else:"""
++## 問題清單
++{issue_summary}
++
++## 修正規則
++- low_contrast: 不修改文字（此問題由主題色碼處理）
++- text_overflow: 將該頁所有文字欄位縮短 30%，保持語意完整
++- excessive_blank: 在該頁增加 1-2 個 cards/items/points，用文件相關內容填充
++- overlap: 減少該頁的 cards 或 steps 數量至 3 個以內
++
++## 要求
++- 只輸出修正後的完整 JSON（整份 slides spec）
++- 保留未出問題投影片的原樣
++- 輸出合法 JSON，不加 ```json 或說明文字
++- 繁體中文
++
++原始 JSON：
++{spec_json}"""
++
++
++async def _apply_qa_fixes(
++    spec_json: str,
++    issues: list[dict],
++    issue_types: "set",
++) -> str | None:
++    """
++    Ask LLM to fix only the problematic slides based on VLM feedback.
++    Has a 60-second timeout to prevent infinite hangs.
++    Returns fixed JSON string, or None if the fix attempt fails.
++    """
++    from app.services.vision_qa import IssueType
++
++    # If only low_contrast issues, fix theme locally without LLM
++    if issue_types == {IssueType.LOW_CONTRAST}:
++        try:
++            spec_dict = json.loads(spec_json)
++            if spec_dict.get("theme") == "frost":
++                spec_dict["theme"] = "ocean"
++                logging.info("QA auto-fix: switched theme frost → ocean (low_contrast)")
++            fixed = SlidesSpec.model_validate(spec_dict)
++            return fixed.model_dump_json()
++        except Exception:
++            logging.exception("QA local theme fix failed")
++            return None
++
++    # Summarise issues for the prompt
++    issue_lines: list[str] = []
++    for slide_issue in issues:
++        slide_num = slide_issue.get("slide", "?")
++        for iss in slide_issue.get("issues", []):
++            iss_type = iss.get("type", "unknown")
++            iss_desc = iss.get("description", "")
++            issue_lines.append(f"  - 第{slide_num}頁 [{iss_type}]: {iss_desc}")
++    issue_summary = "\n".join(issue_lines) or "  (unspecified issues)"
++
++    fix_prompt = _QA_FIX_PROMPT.format(issue_summary=issue_summary, spec_json=spec_json)
++    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
++    fix_client = _fresh_async_client()
++    llm = get_llm(async_client=fix_client)
++    try:
++        async def _stream_fix():
++            parts: list[str] = []
++            async for chunk in await llm.astream_chat(messages):
++                if chunk.delta:
++                    parts.append(chunk.delta)
++            return "".join(parts).strip()
++
++        # 60-second hard timeout
++        raw = await asyncio.wait_for(_stream_fix(), timeout=60)
++        fixed = _strip_code_fence(raw)
++
++        # Validate the fixed JSON is still a valid SlidesSpec
++        SlidesSpec.model_validate_json(fixed)
++        return fixed
++    except asyncio.TimeoutError:
++        logging.warning("QA fix LLM call timed out after 60s — skipping retry")
++        return None
++    except Exception:
++        logging.exception("QA fix LLM call failed for spec — skipping retry")
++        return None
++    finally:
++        await fix_client.aclose()
++
++
++
++
++# Maps SlidesSpec.theme → color palette description for ComfyUI Flux prompts
++_THEME_COLOR_HINTS: dict[str, str] = {
++    "tech":   "dark navy background with electric blue neon glow, cyan circuit patterns, futuristic digital aesthetic",
++    "ocean":  "deep teal gradient with seafoam highlights, flowing water patterns, aquatic marine motifs",
++    "golden": "rich dark brown background with warm amber and gold metallic accents, premium luxury feel",
++    "frost":  "steel blue geometric shapes on soft gray background, ice crystal patterns, silver metallic accents, NOT white background",
++    "garden": "warm ivory background with sage green botanical illustrations, earth tone organic shapes",
++    "sports": "bold crimson red streaks on deep navy, dynamic motion lines, high-energy athletic aesthetic",
++}
++
++# Maps SlidesSpec.theme → illustration visual style
++_THEME_STYLE_HINTS: dict[str, str] = {
++    "tech":   "futuristic 3D render with glowing edges and depth",
++    "ocean":  "soft watercolor illustration with flowing organic forms",
++    "golden": "elegant art deco style with metallic textures and geometry",
++    "frost":  "clean geometric illustration with crystalline angular details",
++    "garden": "warm botanical watercolor with hand-drawn organic feel",
++    "sports": "dynamic motion graphics with bold graphic design and energy",
++}
+ 
+ # Layouts worth illustrating.
+ # Only layouts that have a natural empty zone for an image:
+@@ -710,57 +981,102 @@ _MAX_ILLUSTRATIONS = 5
+ _COMFYUI_IMG_ROOT = Path("/data/comfyui_images")
+ 
+ 
++_SLIDE_ILLUSTRATION_BATCH_PROMPT = """\
++You are an expert at creating image prompts for business presentation slides.
++Generate English image prompts for Flux AI for each slide listed below.
++
++CRITICAL RULES:
++- All prompts must be 100% English — Flux does not support Chinese
++- Each prompt must visually represent its SPECIFIC topic using concrete objects — NOT generic nature or plain backgrounds
++- Topic-to-visual mapping (use as inspiration):
++    AI / machine learning  → neural network nodes, circuit board traces, data stream particles
++    compliance / legal     → official seal, balance scale, document stack, gavel, protective shield
++    risk / security        → layered firewall, lock mechanism, warning indicator, armored vault
++    data / analytics       → 3D bar chart, holographic dashboard, flowing data nodes, graph lines
++    process / workflow     → connected gear system, flowchart pipeline, interlocking steps
++    finance / investment   → ascending chart bars, coin stack, growth curve, currency symbols
++    military / defense     → insignia badge, strategic map, command center, structured ranks
++    education / research   → open book, magnifying glass, academic structure, knowledge graph
++    health / medicine      → cross symbol, cellular structure, diagnostic display, clean lab
++    environment / energy   → leaf circuit, solar array, wind turbine, green gradient sphere
++- Interpret ANY topic not listed above by identifying its core visual metaphors
++
++Visual style for ALL prompts: {style_hint}
++Color palette for ALL prompts: {color_hint}
++Constraints: No human faces; no text or letters in the image; landscape 4:3 format
++
++SLIDES:
++{slides_list}
++
++Return a JSON array of strings — one prompt per slide (30-60 words each), in the same order:
++["prompt for slide 1", "prompt for slide 2", ...]
++Return ONLY the JSON array, nothing else."""
++
++
+ async def _generate_image_prompts_for_slides(
+     eligible: list[tuple[int, object]],
++    theme: str = "tech",
+ ) -> list[str | None]:
+     """
+-    Use LLM to generate English image generation prompts for each eligible slide.
++    Use ONE LLM call to generate English image prompts for all eligible slides.
+     Returns a list of prompt strings (or None if generation fails per slide).
+     """
+-    from app.routers.settings import _runtime_settings as _rs
++    if not eligible:
++        return []
++
++    color_hint = _THEME_COLOR_HINTS.get(theme, _THEME_COLOR_HINTS["tech"])
++    style_hint = _THEME_STYLE_HINTS.get(theme, _THEME_STYLE_HINTS["tech"])
++
++    # Build the slides list section
++    slide_lines: list[str] = []
++    for i, (_slide_idx, slide_data) in enumerate(eligible):
++        title = getattr(slide_data, "title", "") or getattr(slide_data, "quote", "") or ""
++        layout = getattr(slide_data, "layout", "")
++        hint_parts: list[str] = []
++        subtitle = getattr(slide_data, "subtitle", "") or getattr(slide_data, "description", "")
++        if subtitle:
++            hint_parts.append(subtitle)
++        cards: list = getattr(slide_data, "cards", []) or []
++        if cards:
++            hint_parts.extend(getattr(c, "title", "") for c in cards[:3])
++        content_hint = "; ".join(p for p in hint_parts if p) or "(none)"
++        slide_lines.append(f"Slide {i + 1}: layout={layout}, title={title}, content={content_hint}")
++
++    slides_list = "\n".join(slide_lines)
++    user_msg = _SLIDE_ILLUSTRATION_BATCH_PROMPT.format(
++        style_hint=style_hint,
++        color_hint=color_hint,
++        slides_list=slides_list,
++    )
+ 
+-    prompts: list[str | None] = []
+     client = _fresh_async_client()
+     llm = get_llm(async_client=client)
+-
+     try:
+-        for _slide_idx, slide_data in eligible:
+-            title = getattr(slide_data, "title", "") or getattr(slide_data, "quote", "") or ""
+-            layout = getattr(slide_data, "layout", "")
+-
+-            # Build a content hint from available slide fields so the LLM
+-            # can generate a topically relevant prompt instead of guessing.
+-            hint_parts: list[str] = []
+-            subtitle = getattr(slide_data, "subtitle", "") or getattr(slide_data, "description", "")
+-            if subtitle:
+-                hint_parts.append(subtitle)
+-            bullets: list = getattr(slide_data, "bullets", []) or []
+-            if bullets:
+-                hint_parts.extend(str(b) for b in bullets[:3])  # first 3 bullets
+-            # For card_grid / dual_column layouts, grab card titles
+-            cards: list = getattr(slide_data, "cards", []) or []
+-            if cards:
+-                hint_parts.extend(getattr(c, "title", "") for c in cards[:3])
+-            content_hint = "; ".join(p for p in hint_parts if p) or "(none)"
+-
+-            user_msg = _SLIDE_ILLUSTRATION_PROMPT.format(
+-                layout=layout, title=title, content_hint=content_hint
+-            )
+-            messages = [ChatMessage(role=MessageRole.USER, content=user_msg)]
+-            try:
+-                parts: list[str] = []
+-                async for chunk in await llm.astream_chat(messages):
+-                    if chunk.delta:
+-                        parts.append(chunk.delta)
+-                img_prompt = "".join(parts).strip()
+-                prompts.append(img_prompt if img_prompt else None)
+-            except Exception:
+-                logging.exception("Image prompt LLM call failed for slide_idx=%d", _slide_idx)
+-                prompts.append(None)
++        parts: list[str] = []
++        async for chunk in await llm.astream_chat(
++            [ChatMessage(role=MessageRole.USER, content=user_msg)]
++        ):
++            if chunk.delta:
++                parts.append(chunk.delta)
++        raw = "".join(parts).strip()
++        raw = _strip_code_fence(raw)
++
++        parsed = json.loads(raw)
++        if isinstance(parsed, list):
++            # Pad or truncate to match eligible count
++            result: list[str | None] = []
++            for i in range(len(eligible)):
++                val = parsed[i] if i < len(parsed) else None
++                result.append(str(val).strip() if val else None)
++            return result
++        raise ValueError(f"Expected JSON array, got: {type(parsed)}")
++
++    except Exception:
++        logging.exception("Batch image prompt generation failed — no illustrations")
++        return [None] * len(eligible)
+     finally:
+         await client.aclose()
+ 
+-    return prompts
+ 
+ 
+ def _embed_images_in_pptx(
+@@ -839,8 +1155,9 @@ async def _add_illustrations_to_pptx(
+     logging.info("Generating ComfyUI illustrations for %d slides (artifact=%d)", len(eligible), artifact_id)
+     update_studio_artifact(artifact_id, progress_message=f"正在生成投影片插圖 (0/{len(eligible)})…")
+ 
+-    # Step 1: Generate English prompts via LLM
+-    img_prompts = await _generate_image_prompts_for_slides(eligible)
++    # Step 1: Generate English prompts via LLM (pass theme for color palette guidance)
++    theme = getattr(spec, "theme", "tech") or "tech"
++    img_prompts = await _generate_image_prompts_for_slides(eligible, theme=theme)
+ 
+     # Step 2: Generate images via ComfyUI (max 2 concurrent)
+     img_dir = _COMFYUI_IMG_ROOT / str(artifact_id)
+@@ -877,114 +1194,3 @@ async def _add_illustrations_to_pptx(
+         "ComfyUI illustrations: %d/%d embedded for artifact=%d",
+         success_count, len(eligible), artifact_id,
+     )
+-
+-
+-async def _fix_pptxgenjs_code(code: str, error_msg: str) -> str:
+-    """
+-    Ask the LLM to fix an error in PptxGenJS code.
+-    Returns the corrected code, or the original code if the fix attempt fails.
+-    """
+-    fix_prompt = (
+-        "以下 PptxGenJS 程式碼執行時發生錯誤，請修正並只輸出修正後的完整 JS 程式碼，"
+-        "不加任何說明或 markdown 標記。\n\n"
+-        "重要提醒：每張投影片必須先 var sld = pres.addSlide({bkgd:theme.bg}) 才能使用 sld。\n\n"
+-        f"錯誤訊息：{error_msg}\n\n"
+-        f"程式碼：\n{code}"
+-    )
+-    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
+-    fix_client = _fresh_async_client()
+-    llm = get_llm(async_client=fix_client)
+-    try:
+-        parts: list[str] = []
+-        async for chunk in await llm.astream_chat(messages):
+-            if chunk.delta:
+-                parts.append(chunk.delta)
+-        fixed = "".join(parts).strip()
+-        fixed = _strip_code_fence(fixed)
+-        return fixed if fixed else code
+-    except Exception:
+-        logging.exception("Code fix LLM call failed for artifact — using original code")
+-        return code
+-    finally:
+-        await fix_client.aclose()
+-
+-
+-async def _generate_slides_pptx_bg(artifact_id: int, pptxgenjs_code: str) -> None:
+-    """
+-    Background task for slides:
+-      1. Execute LLM-generated PptxGenJS code → .pptx file (Node.js runner)
+-         On SyntaxError or RuntimeError: ask LLM to fix and retry once.
+-      2. Persist the .pptx to /data/thumbnails/{id}/slides.pptx for download
+-      3. Convert .pptx → JPEG thumbnails (soffice → fitz)
+-    """
+-    from app.services.pptx_runner_service import execute_pptxgenjs, RunResult
+-    from app.services.thumbnail_service import generate_thumbnails
+-
+-    with tempfile.TemporaryDirectory() as tmp:
+-        pptx_tmp = str(Path(tmp) / "slides.pptx")
+-        update_studio_artifact(artifact_id, progress_message="正在執行 PptxGenJS 生成簡報…")
+-
+-        result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+-
+-        # On syntax or runtime error: ask LLM to fix then retry once
+-        if result in (RunResult.SYNTAX_ERROR, RunResult.RUNTIME_ERROR):
+-            logging.warning("PptxGenJS %s for artifact %d — asking LLM to fix", result.value, artifact_id)
+-            update_studio_artifact(artifact_id, progress_message="偵測到執行錯誤，正在要求 AI 修正…")
+-            pptxgenjs_code = await _fix_pptxgenjs_code(pptxgenjs_code, stderr)
+-            update_studio_artifact(artifact_id, progress_message="重新執行修正後的程式碼…")
+-            # Remove stale output file from first attempt before retry
+-            Path(pptx_tmp).unlink(missing_ok=True)
+-            result, stderr = await execute_pptxgenjs(pptxgenjs_code, pptx_tmp)
+-
+-        if result != RunResult.SUCCESS:
+-            logging.error(
+-                "PptxGenJS execution failed for artifact %d (%s): %s",
+-                artifact_id, result, stderr,
+-            )
+-            update_studio_artifact(
+-                artifact_id,
+-                status="error",
+-                error_message="PptxGenJS 執行失敗，請稍後重試。",
+-            )
+-            return
+-
+-        # Persist PPTX alongside thumbnails so it can be served as a static file
+-        # at /thumbnails/{artifact_id}/slides.pptx
+-        persistent_dir = _THUMB_ROOT / str(artifact_id)
+-        persistent_dir.mkdir(parents=True, exist_ok=True)
+-        pptx_path = persistent_dir / "slides.pptx"
+-        shutil.copy2(pptx_tmp, pptx_path)
+-
+-        update_studio_artifact(artifact_id, progress_message="正在生成投影片縮圖…")
+-        try:
+-            await asyncio.to_thread(generate_thumbnails, artifact_id, str(pptx_path))
+-        except Exception:
+-            logging.exception("Thumbnail generation failed: artifact=%d", artifact_id)
+-            update_studio_artifact(
+-                artifact_id,
+-                status="error",
+-                error_message="縮圖生成失敗，請稍後重試。",
+-            )
+-            return
+-
+-        # Optional: Vision QA — only runs when vision_model is configured
+-        from app.routers.settings import _runtime_settings
+-        from app.services.vision_qa import visual_qa_check
+-        from app.services.thumbnail_service import get_thumbnail_urls
+-
+-        if _runtime_settings.vision_model:
+-            thumb_urls = get_thumbnail_urls(artifact_id)
+-            thumb_paths = [_THUMB_ROOT / str(artifact_id) / Path(u).name for u in thumb_urls]
+-            update_studio_artifact(artifact_id, progress_message="正在進行視覺品質檢查…")
+-            issues = await visual_qa_check(
+-                thumb_paths,
+-                api_base_url=_runtime_settings.llm_api_base_url,
+-                api_key=_runtime_settings.llm_api_key,
+-                model=_runtime_settings.vision_model,
+-            )
+-            problem_count = sum(len(s.get("issues", [])) for s in issues)
+-            if problem_count > 0:
+-                logging.warning("Vision QA found %d issue(s) in artifact %d: %s", problem_count, artifact_id, issues)
+-
+-        # Thumbnails ready — mark artifact as done so frontend stops polling
+-        update_studio_artifact(artifact_id, status="done", progress_message="")
+diff --git a/backend/app/services/thumbnail_service.py b/backend/app/services/thumbnail_service.py
+index 809bd54..da7439c 100644
+--- a/backend/app/services/thumbnail_service.py
++++ b/backend/app/services/thumbnail_service.py
+@@ -44,7 +44,7 @@ def thumbnails_exist(artifact_id: int) -> bool:
+ 
+ # ── Generation pipeline ───────────────────────────────────────
+ 
+-def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
++def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> tuple[list[str], int]:
+     """
+     Blocking pipeline: PPTX → PDF → JPEG thumbnails.
+ 
+@@ -52,7 +52,9 @@ def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
+         artifact_id: Studio artifact ID (used for output directory naming).
+         pptx_path:   Path to an already-generated .pptx file.
+ 
+-    Returns list of thumbnail URL paths on success, empty list on failure.
++    Returns:
++        (thumbnail_url_list, page_count) tuple.
++        page_count is 0 on failure.
+     """
+     out_dir = _thumb_dir(artifact_id)
+     out_dir.mkdir(parents=True, exist_ok=True)
+@@ -78,12 +80,12 @@ def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
+                 artifact_id, result.returncode,
+                 result.stderr.decode(errors="replace"),
+             )
+-            return []
++            return [], 0
+ 
+         pdf_path = tmp_path / "slides.pdf"
+         if not pdf_path.exists():
+             log.error("soffice produced no PDF for artifact %d", artifact_id)
+-            return []
++            return [], 0
+ 
+         # Step 2b: Strip malformed structure tree from LibreOffice-generated PDF.
+         # LibreOffice exports tagged PDFs whose /StructTreeRoot is often incomplete,
+@@ -122,6 +124,6 @@ def generate_thumbnails(artifact_id: int, pptx_path: str | Path) -> list[str]:
+             log.info("Generated %d thumbnails for artifact %d", page_count, artifact_id)
+         except Exception:
+             log.exception("fitz rendering failed for artifact %d", artifact_id)
+-            return []
++            return [], 0
+ 
+-    return get_thumbnail_urls(artifact_id)
++    return get_thumbnail_urls(artifact_id), page_count
+diff --git a/backend/app/services/vision_qa.py b/backend/app/services/vision_qa.py
+index 8a6b5e5..3a74120 100644
+--- a/backend/app/services/vision_qa.py
++++ b/backend/app/services/vision_qa.py
+@@ -6,27 +6,97 @@ and returns a list of per-slide issues found.
+ 
+ Enabled only when `vision_model` is set in settings.
+ 
+-NOTE: Images are processed one at a time to avoid CUDA OOM caused by
+-multi-image tensor concatenation in the Llama 4 vision pipeline.
++Changes from v1:
++- Structured issue types for automated repair classification
++- Parallel processing (up to 4 concurrent requests) for faster QA
+ """
++import asyncio
+ import base64
+ import json
+ import logging
++from enum import Enum
+ from pathlib import Path
+ 
+ import httpx
+ 
+ log = logging.getLogger(__name__)
+ 
+-_QA_PROMPT = """Check this presentation slide for visual issues:
+-- Text overflow or cut off at edges
+-- Elements overlapping in a way that hurts readability
+-- Uneven spacing or excessive blank areas
+-- Low contrast (text unreadable on background)
+-- Numbers or words split awkwardly across lines
+-Return JSON only: {"issues": ["description"]}
++
++class IssueType(str, Enum):
++    LOW_CONTRAST = "low_contrast"
++    TEXT_OVERFLOW = "text_overflow"
++    EXCESSIVE_BLANK = "excessive_blank"
++    OVERLAP = "overlap"
++    UNKNOWN = "unknown"
++
++
++_QA_PROMPT = """Check this presentation slide for visual issues.
++Return JSON only, no explanation.
++
++Issue types to detect:
++- "low_contrast": text color is too similar to background, hard to read
++- "text_overflow": text is cut off at the edge of the slide
++- "excessive_blank": large empty white/blank areas taking over the slide
++- "overlap": elements overlap each other hurting readability
++- "unknown": any other visual problem
++
++Format: {"issues": [{"type": "<issue_type>", "description": "<brief description>"}]}
+ Return {"issues": []} if everything looks fine."""
+ 
++# Max concurrent VLM requests (avoid CUDA OOM on constrained hosts)
++_QA_SEMAPHORE_SIZE = 4
++
++
++async def _check_one_slide(
++    client: httpx.AsyncClient,
++    sem: asyncio.Semaphore,
++    path: Path,
++    slide_idx: int,
++    api_base_url: str,
++    api_key: str,
++    model: str,
++) -> dict | None:
++    """Check a single slide thumbnail. Returns issue dict or None."""
++    async with sem:
++        try:
++            img_b64 = base64.standard_b64encode(path.read_bytes()).decode()
++        except OSError:
++            log.warning("vision_qa: cannot read thumbnail %s, skipping", path)
++            return None
++
++        content = [
++            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
++            {"type": "text", "text": f"Slide {slide_idx + 1}\n\n{_QA_PROMPT}"},
++        ]
++
++        try:
++            resp = await client.post(
++                f"{api_base_url}/chat/completions",
++                headers={"Authorization": f"Bearer {api_key}"},
++                json={
++                    "model": model,
++                    "messages": [{"role": "user", "content": content}],
++                    "max_tokens": 400,
++                },
++            )
++            resp.raise_for_status()
++            raw = resp.json()["choices"][0]["message"]["content"].strip()
++
++            # Strip markdown fences if the model wraps JSON in ```json ... ```
++            if raw.startswith("```"):
++                lines = [line for line in raw.split("\n") if not line.strip().startswith("```")]
++                raw = "\n".join(lines).strip()
++
++            parsed = json.loads(raw)
++            issues = parsed.get("issues", [])
++            if issues:
++                return {"slide": slide_idx + 1, "issues": issues}
++            return None
++
++        except Exception as exc:
++            log.warning("vision_qa: slide %d check failed (non-fatal): %s", slide_idx + 1, type(exc).__name__)
++            return None
++
+ 
+ async def visual_qa_check(
+     thumbnail_paths: list[Path],
+@@ -35,9 +105,7 @@ async def visual_qa_check(
+     model: str,
+ ) -> list[dict]:
+     """
+-    Send slide thumbnails to the vision model and return issues per slide.
+-
+-    Each slide is sent as an individual request to avoid multi-image CUDA OOM.
++    Send slide thumbnails to the vision model in parallel and return issues per slide.
+ 
+     Args:
+         thumbnail_paths: Ordered list of JPEG paths (slide_000.jpg, …).
+@@ -46,52 +114,35 @@ async def visual_qa_check(
+         model:           Vision model ID.
+ 
+     Returns:
+-        List of {"slide": N, "issues": [...]} dicts for slides with problems.
+-        Returns [] on error (QA failure is non-fatal).
++        List of {"slide": N, "issues": [{"type": ..., "description": ...}]} dicts
++        for slides with problems. Returns [] on error (QA failure is non-fatal).
+     """
+     if not thumbnail_paths:
+         return []
+ 
+-    all_issues: list[dict] = []
++    sem = asyncio.Semaphore(_QA_SEMAPHORE_SIZE)
+ 
+     async with httpx.AsyncClient(verify=False, timeout=120) as client:
+-        for i, path in enumerate(thumbnail_paths):
+-            try:
+-                img_b64 = base64.standard_b64encode(path.read_bytes()).decode()
+-            except OSError:
+-                log.warning("vision_qa: cannot read thumbnail %s, skipping", path)
+-                continue
++        tasks = [
++            _check_one_slide(client, sem, path, i, api_base_url, api_key, model)
++            for i, path in enumerate(thumbnail_paths)
++        ]
++        results = await asyncio.gather(*tasks, return_exceptions=False)
++
++    return [r for r in results if r is not None]
+ 
+-            content = [
+-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+-                {"type": "text", "text": f"Slide {i + 1}\n\n{_QA_PROMPT}"},
+-            ]
+ 
++def classify_issues(issues: list[dict]) -> set[IssueType]:
++    """
++    Extract unique issue types from visual_qa_check results.
++    Used by the feedback loop to decide which auto-repairs to apply.
++    """
++    types: set[IssueType] = set()
++    for slide_issues in issues:
++        for issue in slide_issues.get("issues", []):
++            raw_type = issue.get("type", "unknown")
+             try:
+-                resp = await client.post(
+-                    f"{api_base_url}/chat/completions",
+-                    headers={"Authorization": f"Bearer {api_key}"},
+-                    json={
+-                        "model": model,
+-                        "messages": [{"role": "user", "content": content}],
+-                        "max_tokens": 300,
+-                    },
+-                )
+-                resp.raise_for_status()
+-                raw = resp.json()["choices"][0]["message"]["content"].strip()
+-
+-                # Strip markdown fences if the model wraps JSON in ```json ... ```
+-                if raw.startswith("```"):
+-                    lines = [l for l in raw.split("\n") if not l.strip().startswith("```")]
+-                    raw = "\n".join(lines).strip()
+-
+-                parsed = json.loads(raw)
+-                issues = parsed.get("issues", [])
+-                if issues:
+-                    all_issues.append({"slide": i + 1, "issues": issues})
+-
+-            except Exception as exc:
+-                log.warning("vision_qa: slide %d check failed (non-fatal): %s", i + 1, type(exc).__name__)
+-                continue
+-
+-    return all_issues
++                types.add(IssueType(raw_type))
++            except ValueError:
++                types.add(IssueType.UNKNOWN)
++    return types
+diff --git a/frontend/src/components/StudioPanel.tsx b/frontend/src/components/StudioPanel.tsx
+index d980e0f..626e40a 100644
+--- a/frontend/src/components/StudioPanel.tsx
++++ b/frontend/src/components/StudioPanel.tsx
+@@ -67,7 +67,7 @@ function ArtifactViewer({ artifact, onAskQuestion }: { artifact: StudioArtifact;
+     if (artifact.status !== "done") return null;
+ 
+     if (artifact.artifact_type === "slides") {
+-        return <SlidesViewer code={artifact.content_text} artifactId={artifact.id} />;
++        return <SlidesViewer code={artifact.content_text} artifactId={artifact.id} slideCountFromApi={artifact.slide_count} />;
+     }
+ 
+     if (artifact.artifact_type === "report") {
+diff --git a/frontend/src/components/studio/SlidesViewer.tsx b/frontend/src/components/studio/SlidesViewer.tsx
+index b0466f6..9529676 100644
+--- a/frontend/src/components/studio/SlidesViewer.tsx
++++ b/frontend/src/components/studio/SlidesViewer.tsx
+@@ -8,36 +8,44 @@ interface Props {
+     code: string;
+     artifactId: number;
+     title?: string;
++    /** Slide count from the API (artifact.slide_count). If > 0, skips probing. */
++    slideCountFromApi?: number;
+ }
+ 
+ function thumbUrl(artifactId: number, index: number): string {
+     return `/thumbnails/${artifactId}/slide_${String(index).padStart(3, "0")}.jpg`;
+ }
+ 
+-/** Probe how many JPEG thumbnails exist for this artifact by loading images. */
+-async function probeSlideCount(artifactId: number): Promise<number> {
+-    let count = 0;
+-    while (count < 60) {
+-        const ok = await new Promise<boolean>((resolve) => {
+-            const img = new Image();
+-            img.onload = () => resolve(true);
+-            img.onerror = () => resolve(false);
+-            img.src = thumbUrl(artifactId, count);
+-        });
+-        if (!ok) break;
+-        count++;
+-    }
+-    return count;
+-}
+-
+-export function SlidesViewer({ artifactId, title }: Props) {
++export function SlidesViewer({ artifactId, title, slideCountFromApi }: Props) {
+     const [index, setIndex] = useState(0);
+-    const [slideCount, setSlideCount] = useState<number | null>(null);
++    const [slideCount, setSlideCount] = useState<number | null>(
++        slideCountFromApi && slideCountFromApi > 0 ? slideCountFromApi : null
++    );
+ 
+     useEffect(() => {
+         setIndex(0);
+-        probeSlideCount(artifactId).then(setSlideCount);
+-    }, [artifactId]);
++        if (slideCountFromApi && slideCountFromApi > 0) {
++            setSlideCount(slideCountFromApi);
++        } else {
++            // Fallback: probe by loading images (legacy path, e.g. older artifacts)
++            let cancelled = false;
++            (async () => {
++                let count = 0;
++                while (count < 60) {
++                    const ok = await new Promise<boolean>((resolve) => {
++                        const img = new Image();
++                        img.onload = () => resolve(true);
++                        img.onerror = () => resolve(false);
++                        img.src = thumbUrl(artifactId, count);
++                    });
++                    if (!ok) break;
++                    count++;
++                }
++                if (!cancelled) setSlideCount(count);
++            })();
++            return () => { cancelled = true; };
++        }
++    }, [artifactId, slideCountFromApi]);
+ 
+     const downloadUrl = `/thumbnails/${artifactId}/slides.pptx`;
+ 

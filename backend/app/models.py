@@ -96,6 +96,12 @@ def _run_migrations():
         if sa_cols and "slide_count" not in sa_cols:
             cursor.execute("ALTER TABLE studioartifact ADD COLUMN slide_count INTEGER DEFAULT 0")
 
+        # Migrate Conversation – add history_summary
+        cursor.execute("PRAGMA table_info(conversation)")
+        conv_cols = {row[1] for row in cursor.fetchall()}
+        if conv_cols and "history_summary" not in conv_cols:
+            cursor.execute("ALTER TABLE conversation ADD COLUMN history_summary TEXT DEFAULT ''")
+
         conn.commit()
     except sqlite3.OperationalError as e:
         logging.warning("Migration warning: %s", e)
@@ -259,6 +265,12 @@ def delete_project(project_id: int) -> bool:
         ).all()
         for s in summaries:
             session.delete(s)
+        # Delete document structures
+        structures = session.exec(
+            select(DocumentStructure).where(DocumentStructure.project_id == project_id)
+        ).all()
+        for ds in structures:
+            session.delete(ds)
         # Delete studio artifacts and collect IDs for thumbnail cleanup
         artifacts = session.exec(
             select(StudioArtifact).where(StudioArtifact.project_id == project_id)
@@ -449,6 +461,7 @@ class Conversation(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(index=True)
     title: str = "新對話"
+    history_summary: str = ""   # LLM-compressed summary of older turns (toolUseSummary pattern)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -637,3 +650,79 @@ def list_studio_artifacts(project_id: int) -> list[StudioArtifact]:
     with get_session() as session:
         stmt = select(StudioArtifact).where(StudioArtifact.project_id == project_id)
         return list(session.exec(stmt).all())
+
+
+# ── DocumentStructure model & helpers ────────────────────────
+
+class DocumentStructure(SQLModel, table=True):
+    """
+    Structured metadata extracted from a document by a background LLM call.
+    Borrowed from Claude Code's extractMemories pattern.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    collection_name: str = Field(index=True, unique=True)
+    status: str = "pending"      # pending | generating | done | error
+    structure_json: str = ""     # serialised DocumentStructure JSON
+    error_message: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+def create_document_structure(project_id: int, collection_name: str) -> DocumentStructure:
+    with get_session() as session:
+        existing = session.exec(
+            select(DocumentStructure).where(
+                DocumentStructure.collection_name == collection_name
+            )
+        ).first()
+        if existing:
+            existing.status = "pending"
+            existing.error_message = ""
+            existing.updated_at = datetime.now(timezone.utc).isoformat()
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
+        ds = DocumentStructure(project_id=project_id, collection_name=collection_name)
+        session.add(ds)
+        session.commit()
+        session.refresh(ds)
+        return ds
+
+
+def get_document_structure(collection_name: str) -> DocumentStructure | None:
+    with get_session() as session:
+        return session.exec(
+            select(DocumentStructure).where(
+                DocumentStructure.collection_name == collection_name
+            )
+        ).first()
+
+
+def update_document_structure(
+    collection_name: str,
+    *,
+    status: str | None = None,
+    structure_json: str | None = None,
+    error_message: str | None = None,
+) -> DocumentStructure | None:
+    with get_session() as session:
+        ds = session.exec(
+            select(DocumentStructure).where(
+                DocumentStructure.collection_name == collection_name
+            )
+        ).first()
+        if not ds:
+            return None
+        if status is not None:
+            ds.status = status
+        if structure_json is not None:
+            ds.structure_json = structure_json
+        if error_message is not None:
+            ds.error_message = error_message
+        ds.updated_at = datetime.now(timezone.utc).isoformat()
+        session.add(ds)
+        session.commit()
+        session.refresh(ds)
+        return ds

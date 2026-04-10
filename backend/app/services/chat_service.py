@@ -13,9 +13,14 @@ from llama_index.core.schema import NodeWithScore
 from llama_index.core.llms import ChatMessage, MessageRole
 
 from app.config import get_settings
-from app.models import add_message, touch_conversation
+from app.models import add_message, touch_conversation, get_conversation, Conversation
 from app.services.document_service import get_retriever, list_collections
+from app.services.error_classifier import classify_llm_error, get_user_message
 from app.services.llm_service import get_llm
+
+# History compression thresholds (borrowing from Claude Code toolUseSummary pattern)
+_HISTORY_COMPRESS_THRESHOLD = 6   # compress when history exceeds this many messages
+_HISTORY_KEEP_RECENT = 4          # number of recent messages to keep verbatim after compression
 
 settings = get_settings()
 
@@ -31,6 +36,37 @@ SYSTEM_PROMPT = """This is a single-user local deployment with no resource const
 4. 使用繁體中文（正體中文）回答。
 5. 回答要條理清晰、內容完整。
 """
+
+
+async def _compress_history(
+    older_history: list[dict],
+    llm,
+    existing_summary: str = "",
+) -> str:
+    """
+    Compress older conversation turns into a short summary.
+    Borrowed from Claude Code's toolUseSummaryGenerator pattern:
+    keeps the context window lean by replacing old turns with a ~200-char digest.
+    Failures are silently ignored — the raw history is used as fallback.
+    """
+    turns = []
+    for h in older_history:
+        role_label = "使用者" if h["role"] == "user" else "助手"
+        turns.append(f"{role_label}：{h['content'][:300]}")
+    turns_text = "\n".join(turns)
+
+    prefix = f"（之前摘要：{existing_summary}）\n\n" if existing_summary else ""
+    prompt = (
+        f"{prefix}請用150字以內摘要以下對話的主要問題與回答要點，"
+        f"使用繁體中文，只輸出摘要：\n\n{turns_text}"
+    )
+    try:
+        resp = await llm.achat([
+            ChatMessage(role=MessageRole.USER, content=prompt),
+        ])
+        return resp.message.content.strip()[:400]
+    except Exception:
+        return existing_summary  # keep old summary on failure
 
 
 def _build_context_and_citations(
@@ -94,7 +130,7 @@ async def chat_with_rag(
 
     # 2. Retrieve relevant chunks from all selected collections
     all_nodes: list[NodeWithScore] = []
-    retrieval_errors: list[str] = []
+    retrieval_errors: list[tuple[str, Exception]] = []
     for cname in collection_names:
         try:
             retriever = get_retriever(cname)
@@ -102,7 +138,7 @@ async def chat_with_rag(
             all_nodes.extend(nodes)
         except Exception as e:
             logging.exception("Failed to retrieve from collection: %s", cname)
-            retrieval_errors.append(str(e))
+            retrieval_errors.append((cname, e))
             continue
 
     # Sort by score descending and take top-k
@@ -111,15 +147,10 @@ async def chat_with_rag(
 
     if not all_nodes:
         if retrieval_errors:
-            # Embedding API or ChromaDB error — surface the real cause
-            err_msg = retrieval_errors[0]
-            if "401" in err_msg or "auth" in err_msg.lower() or "api key" in err_msg.lower():
-                msg = "嵌入模型 API 金鑰無效或未設定，請至「設定」頁面填入正確的 API Key 後重試。"
-            elif "connect" in err_msg.lower() or "timeout" in err_msg.lower():
-                msg = f"無法連線到嵌入模型 API（{settings.llm_api_base_url}），請確認服務是否正常運行。"
-            else:
-                msg = f"向量檢索發生錯誤，請確認 API 設定是否正確。（{err_msg[:120]}）"
-            yield _sse({"type": "token", "content": msg})
+            _, first_exc = retrieval_errors[0]
+            error_type = classify_llm_error(first_exc)
+            msg = get_user_message(error_type)
+            yield _sse({"type": "token", "content": f"向量檢索失敗：{msg}"})
         else:
             yield _sse({"type": "token", "content": "在已上傳的文件中找不到與您的問題相關的資訊。"})
         yield _sse({"type": "done"})
@@ -139,14 +170,51 @@ async def chat_with_rag(
     )
 
     # 5. Build message list with conversation history
+    #    Borrow Claude Code toolUseSummary pattern: compress older turns,
+    #    keep only recent _HISTORY_KEEP_RECENT messages verbatim.
     llm = get_llm()
     messages = [
         ChatMessage(role=MessageRole.SYSTEM, content=SYSTEM_PROMPT),
     ]
 
-    # Inject recent conversation history (last 6 messages = ~3 turns)
-    if history:
-        for h in history[-6:]:
+    if history and len(history) > _HISTORY_COMPRESS_THRESHOLD:
+        # Fetch existing summary from DB (may be empty string)
+        existing_summary = ""
+        if conversation_id is not None:
+            conv = get_conversation(conversation_id)
+            if conv:
+                existing_summary = conv.history_summary or ""
+
+        older = history[:-_HISTORY_KEEP_RECENT]
+        recent = history[-_HISTORY_KEEP_RECENT:]
+
+        new_summary = await _compress_history(older, llm, existing_summary)
+
+        # Inject summary as a synthetic assistant turn
+        if new_summary:
+            messages.append(ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content=f"[對話摘要] {new_summary}",
+            ))
+
+        # Persist updated summary back to DB (non-blocking best-effort)
+        if conversation_id is not None and new_summary:
+            try:
+                from app.models import get_session, select, Conversation as ConvModel
+                with get_session() as _sess:
+                    _conv = _sess.get(ConvModel, conversation_id)
+                    if _conv:
+                        _conv.history_summary = new_summary
+                        _sess.add(_conv)
+                        _sess.commit()
+            except Exception:
+                pass  # non-critical
+
+        for h in recent:
+            role = MessageRole.USER if h["role"] == "user" else MessageRole.ASSISTANT
+            messages.append(ChatMessage(role=role, content=h["content"]))
+    elif history:
+        for h in history[-_HISTORY_COMPRESS_THRESHOLD:]:
             role = MessageRole.USER if h["role"] == "user" else MessageRole.ASSISTANT
             messages.append(ChatMessage(role=role, content=h["content"]))
 

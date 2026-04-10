@@ -13,8 +13,10 @@ from pathlib import Path
 
 from llama_index.core.llms import ChatMessage, MessageRole
 
+from app.services.error_classifier import classify_llm_error, get_user_message, LLMErrorType
 from app.services.llm_service import get_llm, _fresh_async_client
 from app.services.summary_service import _collect_document_text
+from app.services.document_structure_service import get_structure_context
 from app.models import (
     list_project_documents,
     update_studio_artifact,
@@ -376,51 +378,116 @@ def _sanitize_json(raw: str) -> str:
     return text.strip()
 
 
+_FIX_FIELD_RULES = (
+    "欄位字元上限（請一次檢查所有欄位，不只修錯誤訊息中提到的那一個）：\n"
+    "- 所有版面 title：20字\n"
+    "- cover subtitle：30字\n"
+    "- section_divider description：40字\n"
+    "- process_flow step description：40字\n"
+    "- content_with_icon block description：40字\n"
+    "- big_number value：10字，unit/label：10/15字\n"
+    "- quote_slide quote：60字\n"
+    "- table header cell：20字，data cell：20字\n"
+    "- conclusion point text：25字\n"
+    "- dual_column points 每條：25字\n"
+    "- content_with_icon blocks 為必填陣列，不可省略\n"
+)
+
+
+def _extract_violated_slide_indices(validation_error: str) -> list[int]:
+    """Parse Pydantic ValidationError text to extract violated slide indices."""
+    return sorted({int(m) for m in re.findall(r"slides\.(\d+)\.", validation_error)})
+
+
 async def _fix_slides_json(raw_json: str, validation_error: str) -> str:
     """
     Ask the LLM to fix a JSON validation error in slides spec.
+
+    Implements microCompact-style partial fix: only sends the violated slide
+    fragments to the LLM instead of the entire JSON, then patches them back.
+    Falls back to full-JSON fix if partial extraction fails.
+
     Returns the corrected JSON string, or the original if the fix fails.
-    Uses slides_model if configured.
     """
     from app.routers.settings import _runtime_settings as _rs
+
+    # --- Try partial fix (microCompact pattern: only send violated slides) ---
+    patched_json = raw_json
+    try:
+        spec = json.loads(raw_json)
+        slides = spec.get("slides", [])
+        violated_indices = _extract_violated_slide_indices(validation_error)
+
+        if violated_indices and all(0 <= i < len(slides) for i in violated_indices):
+            bad_slides = [slides[i] for i in violated_indices]
+            partial_prompt = (
+                f"以下 {len(bad_slides)} 個 slide 有驗證錯誤，請修正並只輸出修正後的 JSON 陣列（不加任何說明或 markdown）。\n\n"
+                f"{_FIX_FIELD_RULES}\n"
+                f"錯誤訊息：\n{validation_error}\n\n"
+                f"需修正的 slides：\n{json.dumps(bad_slides, ensure_ascii=False)}"
+            )
+            fix_client = _fresh_async_client()
+            llm = get_llm(
+                async_client=fix_client,
+                model_override=_rs.slides_model if _rs.slides_model else None,
+            )
+            try:
+                parts: list[str] = []
+                async with asyncio.timeout(90):
+                    async for chunk in await llm.astream_chat(
+                        [ChatMessage(role=MessageRole.USER, content=partial_prompt)]
+                    ):
+                        if chunk.delta:
+                            parts.append(chunk.delta)
+                fixed_raw = _sanitize_json("".join(parts).strip())
+                if fixed_raw:
+                    fixed_slides = json.loads(fixed_raw)
+                    if isinstance(fixed_slides, list) and len(fixed_slides) == len(violated_indices):
+                        for idx, fixed_slide in zip(violated_indices, fixed_slides):
+                            slides[idx] = fixed_slide
+                        spec["slides"] = slides
+                        patched_json = json.dumps(spec, ensure_ascii=False)
+                        logging.info(
+                            "_fix_slides_json partial fix applied for slides %s", violated_indices
+                        )
+                        return patched_json
+            except (asyncio.TimeoutError, Exception):
+                logging.warning("_fix_slides_json partial fix failed — falling back to full fix")
+            finally:
+                await fix_client.aclose()
+    except Exception:
+        logging.warning("_fix_slides_json failed to extract violated indices — using full fix")
+
+    # --- Fallback: full JSON fix ---
     fix_prompt = (
         "以下 JSON 簡報資料有驗證錯誤，請修正並只輸出修正後的完整 JSON，不加任何說明或 markdown 標記。\n\n"
-        "欄位字元上限（請一次檢查所有欄位，不只修錯誤訊息中提到的那一個）：\n"
-        "- 所有版面 title：20字\n"
-        "- cover subtitle：30字\n"
-        "- section_divider description：40字\n"
-        "- process_flow step description：40字\n"
-        "- content_with_icon block description：40字\n"
-        "- big_number value：10字，unit/label：10/15字\n"
-        "- quote_slide quote：60字\n"
-        "- table header cell：20字，data cell：20字\n"
-        "- conclusion point text：25字\n"
-        "- dual_column points 每條：25字\n\n"
+        f"{_FIX_FIELD_RULES}\n"
         f"錯誤訊息：\n{validation_error}\n\n"
         f"原始 JSON：\n{raw_json}"
     )
-    messages = [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
-    fix_client = _fresh_async_client()
-    llm = get_llm(
-        async_client=fix_client,
+    fix_client2 = _fresh_async_client()
+    llm2 = get_llm(
+        async_client=fix_client2,
         model_override=_rs.slides_model if _rs.slides_model else None,
     )
     try:
-        parts: list[str] = []
+        parts2: list[str] = []
         async with asyncio.timeout(90):
-            async for chunk in await llm.astream_chat(messages):
+            async for chunk in await llm2.astream_chat(
+                [ChatMessage(role=MessageRole.USER, content=fix_prompt)]
+            ):
                 if chunk.delta:
-                    parts.append(chunk.delta)
-        fixed = "".join(parts).strip()
-        return _sanitize_json(fixed) if fixed else raw_json
+                    parts2.append(chunk.delta)
+        fixed2 = "".join(parts2).strip()
+        return _sanitize_json(fixed2) if fixed2 else raw_json
     except asyncio.TimeoutError:
-        logging.warning("_fix_slides_json timed out after 90s — using original JSON")
+        logging.warning("_fix_slides_json (full) timed out after 90s — using original JSON")
         return raw_json
     except Exception:
-        logging.exception("_fix_slides_json LLM call failed — using original JSON")
+        logging.exception("_fix_slides_json (full) LLM call failed — using original JSON")
         return raw_json
     finally:
-        await fix_client.aclose()
+        await fix_client2.aclose()
 
 
 def _format_text(artifact_type: str, data: dict) -> str:
@@ -489,16 +556,14 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
     try:
         update_studio_artifact(artifact_id, status="generating", progress_message="正在讀取文件內容…")
 
-        # Collect text from all ready documents in the project
+        # Collect context from all ready documents in the project.
+        # Strategy (borrowing from Claude Code extractMemories):
+        #   1. Try get_structure_context() — uses pre-extracted chapter summaries
+        #   2. Fall back to raw text truncation if structures not yet available
         docs = list_project_documents(project_id)
-        parts: list[str] = []
-        for doc in docs:
-            if doc.status == "ready":
-                text = _collect_document_text(doc.collection_name, max_chars=_MAX_PER_DOC_CHARS)
-                if text:
-                    parts.append(f"=== 文件：{doc.filename} ===\n{text}")
+        ready_collections = [d.collection_name for d in docs if d.status == "ready"]
 
-        if not parts:
+        if not ready_collections:
             update_studio_artifact(
                 artifact_id,
                 status="error",
@@ -514,23 +579,47 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
             )
             return
 
-        # Slides use a tighter text budget to keep the total LLM context smaller,
-        # which reduces model reasoning time (TTFT) significantly.
-        outline = None
-        if artifact_type == "slides":
-            parts_slides: list[str] = []
+        # Try structure context first (higher quality, covers full document)
+        structure_ctx = get_structure_context(ready_collections, max_chars=8000)
+
+        if structure_ctx:
+            # Supplement with raw text sample for richer detail
+            max_raw = _SLIDES_MAX_TOTAL_CHARS if artifact_type == "slides" else _MAX_TOTAL_CHARS
+            raw_parts: list[str] = []
+            per_doc_chars = (max_raw - len(structure_ctx)) // max(len(ready_collections), 1)
+            per_doc_chars = max(per_doc_chars, 2000)
             for doc in docs:
                 if doc.status == "ready":
-                    text = _collect_document_text(doc.collection_name, max_chars=_SLIDES_MAX_PER_DOC_CHARS)
+                    text = _collect_document_text(doc.collection_name, max_chars=per_doc_chars)
                     if text:
-                        parts_slides.append(f"=== 文件：{doc.filename} ===\n{text}")
-            combined = "\n\n".join(parts_slides) if parts_slides else "\n\n".join(parts)
-            if len(combined) > _SLIDES_MAX_TOTAL_CHARS:
-                combined = combined[:_SLIDES_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
+                        raw_parts.append(f"=== 文件：{doc.filename} ===\n{text}")
+            raw_combined = "\n\n".join(raw_parts)
+            combined = f"【文件結構摘要】\n{structure_ctx}\n\n【文件原文（節錄）】\n{raw_combined}"
         else:
+            # Fallback: raw text truncation (original behaviour)
+            parts: list[str] = []
+            for doc in docs:
+                if doc.status == "ready":
+                    per_char = (
+                        _SLIDES_MAX_PER_DOC_CHARS if artifact_type == "slides"
+                        else _MAX_PER_DOC_CHARS
+                    )
+                    text = _collect_document_text(doc.collection_name, max_chars=per_char)
+                    if text:
+                        parts.append(f"=== 文件：{doc.filename} ===\n{text}")
+            if not parts:
+                update_studio_artifact(
+                    artifact_id,
+                    status="error",
+                    error_message="專案中尚無可用的文件內容，請先上傳並等待文件處理完成。",
+                )
+                return
             combined = "\n\n".join(parts)
-            if len(combined) > _MAX_TOTAL_CHARS:
-                combined = combined[:_MAX_TOTAL_CHARS] + "\n\n…（內容已截斷）"
+            max_chars = _SLIDES_MAX_TOTAL_CHARS if artifact_type == "slides" else _MAX_TOTAL_CHARS
+            if len(combined) > max_chars:
+                combined = combined[:max_chars] + "\n\n…（內容已截斷）"
+
+        outline = None
 
         prompt = ARTIFACT_PROMPTS[artifact_type]
 
@@ -620,6 +709,26 @@ async def generate_artifact(project_id: int, artifact_id: int, artifact_type: st
                     await _stream_client.aclose()
                     return
                 # Got partial content — try to use what we have
+            except Exception as _stream_exc:
+                error_type = classify_llm_error(_stream_exc)
+                should_retry = (
+                    error_type not in (LLMErrorType.AUTH_INVALID, LLMErrorType.MODEL_UNAVAILABLE,
+                                       LLMErrorType.PROMPT_TOO_LONG)
+                    and _attempt < _STREAM_MAX_RETRIES
+                )
+                logging.warning(
+                    "LLM streaming error (type=%s) for artifact %d attempt %d: %s",
+                    error_type.value, artifact_id, _attempt + 1, str(_stream_exc)[:200],
+                )
+                if should_retry:
+                    continue
+                update_studio_artifact(
+                    artifact_id,
+                    status="error",
+                    error_message=get_user_message(error_type),
+                )
+                await _stream_client.aclose()
+                return
             break  # success or partial — stop retrying
         await _stream_client.aclose()
         raw = "".join(raw_parts).strip()

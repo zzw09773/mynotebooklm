@@ -43,3 +43,4 @@ backend/uploads/
 data/
 backend/db.sqlite
 docs/
+claude-code-src

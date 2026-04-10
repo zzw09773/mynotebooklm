@@ -32,6 +32,7 @@ from app.services.document_service import (
     _sanitize_collection_name,
 )
 from app.services.summary_service import generate_study_guide
+from app.services.document_structure_service import extract_document_structure
 
 router = APIRouter(prefix="/api/documents", tags=["文件管理"])
 settings = get_settings()
@@ -104,6 +105,9 @@ async def _process_document_background(
         # Trigger study guide generation
         create_summary(project_id, collection_name)
         await generate_study_guide(collection_name, project_id)
+
+        # Trigger background document structure extraction (extractMemories pattern)
+        await extract_document_structure(collection_name, project_id)
 
     except Exception as e:
         logging.exception("Document processing failed for collection: %s", collection_name)
